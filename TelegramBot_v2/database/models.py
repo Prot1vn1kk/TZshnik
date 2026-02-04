@@ -1,0 +1,518 @@
+"""
+SQLAlchemy модели базы данных.
+
+Модели:
+- User: пользователи Telegram
+- Generation: сгенерированные ТЗ
+- GenerationPhoto: фотографии для генерации
+- Payment: платежи за кредиты
+- Feedback: отзывы о качестве ТЗ
+"""
+
+from datetime import datetime
+from typing import List, Optional
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    mapped_column,
+    relationship,
+)
+
+
+class Base(DeclarativeBase):
+    """Базовый класс для всех моделей."""
+    pass
+
+
+class User(Base):
+    """
+    Модель пользователя.
+    
+    Хранит информацию о пользователе Telegram,
+    его балансе кредитов и статистике генераций.
+    
+    Attributes:
+        telegram_id: Уникальный ID пользователя в Telegram
+        username: Username в Telegram (может меняться)
+        first_name: Имя пользователя
+        balance: Количество доступных кредитов
+        total_generated: Общее количество сгенерированных ТЗ
+        is_premium: Флаг премиум-пользователя
+        referred_by: ID реферера (если есть)
+    """
+    
+    __tablename__ = "users"
+    
+    # Primary key
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    
+    # Telegram данные
+    telegram_id: Mapped[int] = mapped_column(
+        BigInteger,
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+    username: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    first_name: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    
+    # Баланс и статистика
+    balance: Mapped[int] = mapped_column(
+        Integer,
+        default=1,  # 1 бесплатное ТЗ при регистрации
+    )
+    total_generated: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+    )
+    is_premium: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+    )
+    
+    # Реферальная система (self-referential FK)
+    referred_by: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    
+    # Relationships
+    generations: Mapped[List["Generation"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    payments: Mapped[List["Payment"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    
+    # Self-referential для рефералов
+    referrals: Mapped[List["User"]] = relationship(
+        back_populates="referrer",
+        foreign_keys="User.referred_by",
+    )
+    referrer: Mapped[Optional["User"]] = relationship(
+        back_populates="referrals",
+        foreign_keys=[referred_by],
+        remote_side=[id],
+    )
+    
+    def __repr__(self) -> str:
+        return f"<User(id={self.id}, tg={self.telegram_id}, balance={self.balance})>"
+
+
+class Generation(Base):
+    """
+    Модель сгенерированного ТЗ.
+    
+    Хранит результат генерации: анализ фото Vision AI,
+    готовое техническое задание и метаданные качества.
+    
+    Attributes:
+        user_id: ID пользователя (FK)
+        category: Категория товара (одежда, электроника, и т.д.)
+        photo_analysis: Результат анализа фото Vision AI
+        tz_text: Полный текст сгенерированного ТЗ
+        quality_score: Оценка качества от валидатора (0-100)
+        regenerations: Количество перегенераций
+        is_free: Флаг бесплатной генерации
+    """
+    
+    __tablename__ = "generations"
+    
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    
+    # Данные генерации
+    category: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+    photo_analysis: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    tz_text: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    
+    # Качество и статус
+    quality_score: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    regenerations: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+    )
+    is_free: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+    )
+    
+    # Timestamp
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+    )
+    
+    # Relationships
+    user: Mapped["User"] = relationship(
+        back_populates="generations",
+    )
+    photos: Mapped[List["GenerationPhoto"]] = relationship(
+        back_populates="generation",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    feedback: Mapped[Optional["Feedback"]] = relationship(
+        back_populates="generation",
+        uselist=False,
+    )
+    
+    def __repr__(self) -> str:
+        return f"<Generation(id={self.id}, cat={self.category}, score={self.quality_score})>"
+
+
+class GenerationPhoto(Base):
+    """
+    Фотографии, использованные для генерации.
+    
+    Хранит Telegram file_id для возможности повторного
+    скачивания или просмотра фотографий.
+    
+    Attributes:
+        generation_id: ID генерации (FK)
+        file_id: Telegram file_id фотографии
+        file_unique_id: Уникальный ID файла в Telegram
+    """
+    
+    __tablename__ = "generation_photos"
+    
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    generation_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("generations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    
+    # Telegram file IDs
+    file_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+    file_unique_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+    
+    # Timestamp
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+    )
+    
+    # Relationship
+    generation: Mapped["Generation"] = relationship(
+        back_populates="photos",
+    )
+    
+    def __repr__(self) -> str:
+        return f"<GenerationPhoto(id={self.id}, gen_id={self.generation_id})>"
+
+
+class Payment(Base):
+    """
+    Модель платежа.
+    
+    Хранит информацию об оплате пакета кредитов
+    через Telegram Payments (YooKassa).
+    
+    Attributes:
+        user_id: ID пользователя (FK)
+        telegram_payment_id: Уникальный ID платежа в Telegram
+        amount: Сумма в копейках
+        currency: Валюта (RUB)
+        credits_added: Количество начисленных кредитов
+        package_name: Название пакета
+        status: Статус платежа
+    """
+    
+    __tablename__ = "payments"
+    
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    
+    # Данные платежа Telegram
+    telegram_payment_id: Mapped[str] = mapped_column(
+        String(255),
+        unique=True,
+        nullable=False,
+    )
+    
+    # Сумма и валюта
+    amount: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,  # В копейках!
+    )
+    currency: Mapped[str] = mapped_column(
+        String(3),
+        default="RUB",
+    )
+    
+    # Что получил пользователь
+    credits_added: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    package_name: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+    
+    # Статус
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default="completed",
+    )
+    
+    # Timestamp
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+    )
+    
+    # Relationship
+    user: Mapped["User"] = relationship(
+        back_populates="payments",
+    )
+    
+    def __repr__(self) -> str:
+        return f"<Payment(id={self.id}, amount={self.amount}, credits={self.credits_added})>"
+
+
+class Feedback(Base):
+    """
+    Обратная связь по сгенерированному ТЗ.
+    
+    Позволяет пользователю оценить качество генерации
+    и оставить комментарий.
+    
+    Attributes:
+        generation_id: ID генерации (FK, unique - один фидбек на ТЗ)
+        user_id: ID пользователя (FK)
+        rating: Оценка (1 = 👍, 0 = 👎)
+        comment: Текстовый комментарий (опционально)
+    """
+    
+    __tablename__ = "feedbacks"
+    
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    generation_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("generations.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,  # Один фидбек на генерацию
+    )
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    
+    # Оценка: 1 = 👍, 0 = 👎
+    rating: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    comment: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    
+    # Timestamp
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+    )
+    
+    # Relationship
+    generation: Mapped["Generation"] = relationship(
+        back_populates="feedback",
+    )
+    
+    def __repr__(self) -> str:
+        return f"<Feedback(id={self.id}, gen_id={self.generation_id}, rating={self.rating})>"
+
+
+class AdminAction(Base):
+    """
+    Логирование действий администратора.
+    
+    Хранит все административные действия для аудита:
+    - Начисление/списание кредитов
+    - Блокировка/разблокировка пользователей
+    - Изменение настроек
+    
+    Attributes:
+        admin_id: Telegram ID администратора
+        action_type: Тип действия (credit_add, credit_remove, block, unblock, etc.)
+        target_user_id: Telegram ID целевого пользователя (если применимо)
+        details: Детали действия в JSON формате
+    """
+    
+    __tablename__ = "admin_actions"
+    
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    
+    # Администратор, выполнивший действие
+    admin_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        index=True,
+    )
+    
+    # Тип действия
+    action_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        index=True,
+    )
+    
+    # Целевой пользователь (если есть)
+    target_user_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    
+    # Детали в JSON
+    details: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    
+    # Timestamp
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<AdminAction(id={self.id}, type={self.action_type}, admin={self.admin_id})>"
+
+
+class BotSettings(Base):
+    """
+    Настройки бота, изменяемые из админ-панели.
+    
+    Хранит глобальные настройки:
+    - Бесплатные генерации для новых пользователей
+    - Режим обслуживания
+    - Другие конфигурируемые параметры
+    """
+    
+    __tablename__ = "bot_settings"
+    
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    
+    key: Mapped[str] = mapped_column(
+        String(100),
+        unique=True,
+        nullable=False,
+    )
+    
+    value: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    
+    description: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<BotSettings(key={self.key}, value={self.value})>"
+
+
+# Дополнительные составные индексы для оптимизации запросов
+Index("ix_generations_user_created", Generation.user_id, Generation.created_at.desc())
+Index("ix_payments_user_created", Payment.user_id, Payment.created_at.desc())
+Index("ix_admin_actions_created", AdminAction.created_at.desc())

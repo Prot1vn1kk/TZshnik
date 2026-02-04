@@ -1,0 +1,26 @@
+services:
+  tzshnik-bot:
+    build: .
+    container_name: tzshnik-bot
+    env_file:
+      - ./TelegramBot_v2/.env
+    volumes:
+      # Персистентные данные (БД и экспорты)
+      - ./TelegramBot_v2/data:/app/data
+      - ./TelegramBot_v2/exports:/app/exports
+    restart: unless-stopped
+    # Логирование
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Лимиты ресурсов
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
