@@ -633,6 +633,14 @@ def get_settings_keyboard(
         ),
     )
     
+    # Очистка статистики прибыли
+    builder.row(
+        InlineKeyboardButton(
+            text="🗑 Сбросить статистику прибыли",
+            callback_data="admin:reset_revenue_stats",
+        ),
+    )
+    
     # Назад
     builder.row(
         InlineKeyboardButton(text="⬅️ Главное меню", callback_data="admin:main"),

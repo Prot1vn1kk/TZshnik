@@ -96,14 +96,27 @@ async def on_startup(bot: Bot) -> None:
     Callback при старте бота.
     
     Выполняется один раз при запуске:
+    - Очищает старые временные файлы
     - Создаёт индексы БД
     - Запускает backup scheduler
+    - Регистрирует команды бота
     - Логирует информацию о боте
     - Уведомляет админа о запуске
     
     Args:
         bot: Экземпляр бота
     """
+    from aiogram.types import BotCommand, BotCommandScopeDefault, BotCommandScopeChat
+    
+    # Очистка старых временных файлов (старше 24 часов)
+    try:
+        from utils.temp_files import cleanup_old_temp_files
+        deleted_count = cleanup_old_temp_files(max_age_hours=24)
+        if deleted_count > 0:
+            logger.info("old_temp_files_cleaned", files_deleted=deleted_count)
+    except Exception as e:
+        logger.warning("failed_to_cleanup_temp_files", error=str(e))
+    
     # Создание индексов БД
     try:
         from database.indexes import ensure_indexes
@@ -118,6 +131,40 @@ async def on_startup(bot: Bot) -> None:
             await backup_scheduler.start()
         except Exception as e:
             logger.warning("failed_to_start_backup_scheduler", error=str(e))
+    
+    # Регистрация команд для всех пользователей
+    user_commands = [
+        BotCommand(command="start", description="🚀 Запустить бота"),
+        BotCommand(command="create", description="📸 Создать ТЗ"),
+        BotCommand(command="balance", description="💰 Мой баланс"),
+        BotCommand(command="buy", description="💳 Купить кредиты"),
+        BotCommand(command="help", description="❓ Помощь"),
+        BotCommand(command="history", description="📋 История генераций"),
+    ]
+    
+    try:
+        await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+        logger.info("user_commands_registered")
+    except Exception as e:
+        logger.warning("failed_to_register_user_commands", error=str(e))
+    
+    # Регистрация админских команд (только для админов)
+    admin_commands = user_commands + [
+        BotCommand(command="admin", description="🔐 Админ-панель"),
+        BotCommand(command="stats", description="📊 Статистика"),
+        BotCommand(command="broadcast", description="📢 Рассылка"),
+        BotCommand(command="users", description="👥 Пользователи"),
+    ]
+    
+    for admin_id in settings.admin_ids:
+        try:
+            await bot.set_my_commands(
+                admin_commands, 
+                scope=BotCommandScopeChat(chat_id=admin_id)
+            )
+            logger.info("admin_commands_registered", admin_id=admin_id)
+        except Exception as e:
+            logger.warning("failed_to_register_admin_commands", admin_id=admin_id, error=str(e))
     
     bot_info = await bot.get_me()
     
@@ -214,8 +261,13 @@ async def main() -> None:
     # Регистрация middleware (порядок важен!)
     from bot.middleware import DatabaseMiddleware, UserMiddleware, LoggingMiddleware
     from bot.middlewares.throttling import ThrottlingMiddleware
+    from bot.middlewares.album import AlbumMiddleware
     
-    # Throttling - первый для защиты от спама
+    # Album middleware - ПЕРВЫЙ для сбора медиагрупп (несколько фото сразу)
+    # Должен быть до throttling, чтобы альбомы обрабатывались как один запрос
+    dp.message.middleware(AlbumMiddleware())
+    
+    # Throttling - защита от спама (после album, чтобы не блокировать каждое фото альбома)
     throttling_middleware = ThrottlingMiddleware()
     dp.message.middleware(throttling_middleware)
     dp.callback_query.middleware(throttling_middleware)

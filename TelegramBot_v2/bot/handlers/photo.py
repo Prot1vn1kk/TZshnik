@@ -2,21 +2,38 @@
 Обработчики для работы с фотографиями.
 
 Содержит:
-- Приём фото от пользователя
-- Валидация и скачивание
+- Приём фото от пользователя (включая альбомы/медиагруппы)
+- Валидация форматов (только .jpeg и .png)
+- Сохранение во временную папку
+- Подтверждение и удаление загруженных фото
 - Управление списком фото (добавить ещё / продолжить)
 """
 
 from typing import List, Optional
 
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, PhotoSize
+from aiogram.types import Message, CallbackQuery, PhotoSize, Document
 from aiogram.fsm.context import FSMContext
 import structlog
 
 from database.models import User
-from bot.keyboards import get_photo_actions_keyboard, get_category_keyboard, get_main_keyboard
+from bot.keyboards import (
+    get_photo_actions_keyboard,
+    get_photo_confirmation_keyboard,
+    get_photo_delete_keyboard,
+    get_category_keyboard,
+    get_main_menu_keyboard,
+)
 from bot.states import GenerationStates
+from utils.temp_files import (
+    TempPhoto,
+    save_temp_photo,
+    delete_temp_photo,
+    clear_user_temp_files,
+    read_temp_photo,
+    format_file_list,
+    ALLOWED_EXTENSIONS,
+)
 
 
 logger = structlog.get_logger()
@@ -28,6 +45,20 @@ router = Router(name="photo")
 # ============================================================
 
 MAX_PHOTOS = 5  # Максимум фото для одной генерации
+
+# Сообщения для пользователя
+INVALID_FORMAT_MESSAGE = (
+    "⚠️ <b>Неподдерживаемый формат!</b>\n\n"
+    "Допустимые форматы: <b>JPEG</b> и <b>PNG</b>\n\n"
+    "Пожалуйста, отправьте изображение в правильном формате."
+)
+
+PHOTO_UPLOAD_PROMPT = (
+    "📷 <b>Отправьте фото товара</b>\n\n"
+    "• Поддерживаемые форматы: JPEG, PNG\n"
+    "• Можно отправить до 5 фото\n"
+    "• Для лучшего результата покажите товар с разных сторон"
+)
 
 
 # ============================================================
@@ -45,13 +76,41 @@ async def download_photo(bot: Bot, photo: PhotoSize) -> Optional[bytes]:
     Returns:
         bytes: Бинарные данные фото или None при ошибке
     """
-    file = await bot.get_file(photo.file_id)
-    if not file.file_path:
+    try:
+        file = await bot.get_file(photo.file_id)
+        if not file.file_path:
+            return None
+        file_bytes = await bot.download_file(file.file_path)
+        if file_bytes is None:
+            return None
+        return file_bytes.read()
+    except Exception as e:
+        logger.error("photo_download_failed", error=str(e))
         return None
-    file_bytes = await bot.download_file(file.file_path)
-    if file_bytes is None:
+
+
+async def download_document(bot: Bot, document: Document) -> Optional[bytes]:
+    """
+    Скачивает документ (файл) из Telegram.
+    
+    Args:
+        bot: Экземпляр бота
+        document: Объект Document
+        
+    Returns:
+        bytes: Бинарные данные файла или None при ошибке
+    """
+    try:
+        file = await bot.get_file(document.file_id)
+        if not file.file_path:
+            return None
+        file_bytes = await bot.download_file(file.file_path)
+        if file_bytes is None:
+            return None
+        return file_bytes.read()
+    except Exception as e:
+        logger.error("document_download_failed", error=str(e))
         return None
-    return file_bytes.read()
 
 
 def get_best_photo(photos: Optional[List[PhotoSize]]) -> Optional[PhotoSize]:
@@ -72,8 +131,142 @@ def get_best_photo(photos: Optional[List[PhotoSize]]) -> Optional[PhotoSize]:
     return max(photos, key=lambda p: p.width * p.height)
 
 
+def get_photos_from_state(data: dict) -> List[TempPhoto]:
+    """
+    Извлекает список TempPhoto из FSM state data.
+    
+    Args:
+        data: Данные из state.get_data()
+        
+    Returns:
+        Список TempPhoto объектов
+    """
+    photos_data = data.get("photos", [])
+    return [TempPhoto.from_dict(p) for p in photos_data]
+
+
+def photos_to_state(photos: List[TempPhoto]) -> List[dict]:
+    """
+    Конвертирует список TempPhoto в формат для FSM state.
+    
+    Args:
+        photos: Список TempPhoto объектов
+        
+    Returns:
+        Список словарей для сохранения в state
+    """
+    return [p.to_dict() for p in photos]
+
+
+async def process_and_save_photo(
+    bot: Bot,
+    user_id: int,
+    photo: PhotoSize,
+    existing_photos: List[TempPhoto],
+) -> tuple[Optional[TempPhoto], str]:
+    """
+    Обрабатывает и сохраняет одно фото.
+    
+    Args:
+        bot: Экземпляр бота
+        user_id: Telegram ID пользователя
+        photo: Объект PhotoSize
+        existing_photos: Уже загруженные фото
+        
+    Returns:
+        Tuple[TempPhoto или None, сообщение об ошибке]
+    """
+    # Проверяем лимит
+    if len(existing_photos) >= MAX_PHOTOS:
+        return None, f"Достигнут лимит в {MAX_PHOTOS} фото"
+    
+    # Скачиваем фото
+    photo_bytes = await download_photo(bot, photo)
+    if not photo_bytes:
+        return None, "Не удалось загрузить фото"
+    
+    # Сохраняем во временную папку (валидация формата внутри)
+    temp_photo, error = save_temp_photo(
+        user_id=user_id,
+        file_bytes=photo_bytes,
+        mime_type="image/jpeg",  # Telegram всегда отправляет JPEG для сжатых фото
+    )
+    
+    return temp_photo, error
+
+
+async def process_album_photos(
+    bot: Bot,
+    user_id: int,
+    album: List[Message],
+    existing_photos: List[TempPhoto],
+) -> tuple[List[TempPhoto], int, int]:
+    """
+    Обрабатывает альбом фотографий.
+    
+    Args:
+        bot: Экземпляр бота
+        user_id: Telegram ID пользователя
+        album: Список сообщений с фото
+        existing_photos: Уже загруженные фото
+        
+    Returns:
+        tuple: (обновлённый список фото, успешно загружено, ошибок)
+    """
+    photos = existing_photos.copy()
+    success_count = 0
+    error_count = 0
+    
+    for msg in album:
+        # Проверяем лимит
+        if len(photos) >= MAX_PHOTOS:
+            break
+            
+        if not msg.photo:
+            continue
+            
+        photo = get_best_photo(msg.photo)
+        if not photo:
+            error_count += 1
+            continue
+        
+        temp_photo, error = await process_and_save_photo(
+            bot, user_id, photo, photos
+        )
+        
+        if temp_photo:
+            photos.append(temp_photo)
+            success_count += 1
+        else:
+            error_count += 1
+            logger.warning("album_photo_failed", user_id=user_id, error=error)
+    
+    return photos, success_count, error_count
+
+
+def format_confirmation_message(photos: List[TempPhoto]) -> str:
+    """
+    Формирует сообщение подтверждения загруженных фото.
+    
+    Args:
+        photos: Список TempPhoto
+        
+    Returns:
+        Форматированное сообщение
+    """
+    file_list = format_file_list(photos)
+    
+    return (
+        f"📸 <b>Вы загрузили {len(photos)} файл(ов)</b>\n\n"
+        f"{file_list}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Если вы случайно добавили лишний файл — нажмите <b>«Удалить»</b>\n"
+        "Если всё верно — нажмите <b>«Подтвердить»</b>"
+    )
+
+
 # ============================================================
-# ОБРАБОТЧИКИ ФОТО
+# ОБРАБОТЧИКИ ФОТО (сжатые изображения)
 # ============================================================
 
 @router.message(GenerationStates.waiting_photo, F.photo)
@@ -82,55 +275,101 @@ async def handle_first_photo(
     bot: Bot,
     state: FSMContext,
     user: User,
+    album: Optional[List[Message]] = None,
+    is_album: bool = False,
 ) -> None:
     """
     Обработка первого фото от пользователя.
     
-    Скачивает фото и предлагает добавить ещё или продолжить.
+    Поддерживает как одиночные фото, так и альбомы (медиагруппы).
     """
-    # Получаем лучшее качество
+    user_id = message.from_user.id if message.from_user else 0
+    
+    # Очищаем предыдущие временные файлы
+    clear_user_temp_files(user_id)
+    
+    data = await state.get_data()
+    existing_photos = get_photos_from_state(data)
+    
+    # Если это альбом - обрабатываем все фото сразу
+    if is_album and album:
+        photos, success_count, error_count = await process_album_photos(
+            bot, user_id, album, existing_photos
+        )
+        
+        if success_count == 0:
+            await message.answer(
+                "❌ Не удалось загрузить фотографии. Попробуйте ещё раз.",
+                parse_mode="HTML",
+            )
+            return
+        
+        await state.update_data(photos=photos_to_state(photos))
+        await state.set_state(GenerationStates.waiting_more_photos)
+        
+        logger.info(
+            "album_photos_received",
+            telegram_id=user_id,
+            album_size=len(album),
+            success=success_count,
+            errors=error_count,
+            total_photos=len(photos),
+        )
+        
+        # Формируем сообщение
+        status = f"✅ <b>Загружено {success_count} фото!</b>"
+        if error_count > 0:
+            status += f" (⚠️ {error_count} не удалось загрузить)"
+        
+        if len(photos) >= MAX_PHOTOS:
+            await message.answer(
+                f"{status} ({len(photos)}/{MAX_PHOTOS} — максимум)\n\n"
+                "Нажмите «Готово» для проверки файлов.",
+                reply_markup=get_photo_actions_keyboard(len(photos)),
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                f"{status} ({len(photos)}/{MAX_PHOTOS})\n\n"
+                "Вы можете добавить ещё фото или проверить загруженные.",
+                reply_markup=get_photo_actions_keyboard(len(photos)),
+                parse_mode="HTML",
+            )
+        return
+    
+    # Одиночное фото
     photo = get_best_photo(message.photo)
     if not photo:
         await message.answer("❌ Не удалось получить фото. Попробуйте ещё раз.")
         return
     
-    # Скачиваем фото
-    try:
-        photo_bytes = await download_photo(bot, photo)
-        if not photo_bytes:
-            raise ValueError("Empty photo data")
-    except Exception as e:
-        logger.error("Failed to download photo", error=str(e))
+    temp_photo, error = await process_and_save_photo(
+        bot, user_id, photo, existing_photos
+    )
+    
+    if not temp_photo:
         await message.answer(
-            "❌ Не удалось загрузить фото. Попробуйте ещё раз.",
+            f"❌ {error or 'Не удалось загрузить фото'}. Попробуйте ещё раз.",
+            parse_mode="HTML",
         )
         return
     
-    # Сохраняем в состояние (включая file_id для записи в БД)
-    data = await state.get_data()
-    photos: List[dict] = data.get("photos", [])
-    photos.append({
-        "bytes": photo_bytes,
-        "file_id": photo.file_id,
-        "file_unique_id": photo.file_unique_id,
-    })
-    
-    await state.update_data(photos=photos)
+    photos = existing_photos + [temp_photo]
+    await state.update_data(photos=photos_to_state(photos))
     await state.set_state(GenerationStates.waiting_more_photos)
     
     logger.info(
-        "Photo received",
-        telegram_id=message.from_user.id if message.from_user else 0,
+        "photo_received",
+        telegram_id=user_id,
         photo_count=len(photos),
-        photo_size=len(photo_bytes),
+        filename=temp_photo.filename,
     )
     
-    # Показываем опции
     await message.answer(
-        f"✅ *Фото загружено!* ({len(photos)}/{MAX_PHOTOS})\n\n"
-        "Вы можете добавить ещё фото или продолжить.",
+        f"✅ <b>Фото загружено!</b> ({len(photos)}/{MAX_PHOTOS})\n\n"
+        "Вы можете добавить ещё фото или проверить загруженные.",
         reply_markup=get_photo_actions_keyboard(len(photos)),
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
 
 
@@ -139,75 +378,270 @@ async def handle_additional_photo(
     message: Message,
     bot: Bot,
     state: FSMContext,
+    album: Optional[List[Message]] = None,
+    is_album: bool = False,
 ) -> None:
     """
     Обработка дополнительных фото.
     
-    Добавляет фото к списку, проверяет лимит.
+    Поддерживает как одиночные фото, так и альбомы.
     """
+    user_id = message.from_user.id if message.from_user else 0
     data = await state.get_data()
-    photos: List[dict] = data.get("photos", [])
+    existing_photos = get_photos_from_state(data)
     
     # Проверяем лимит
-    if len(photos) >= MAX_PHOTOS:
+    if len(existing_photos) >= MAX_PHOTOS:
         await message.answer(
-            f"⚠️ *Достигнут лимит в {MAX_PHOTOS} фото!*\n\n"
-            "Нажмите «Продолжить» для выбора категории.",
-            reply_markup=get_photo_actions_keyboard(len(photos)),
-            parse_mode="Markdown",
+            f"⚠️ <b>Достигнут лимит в {MAX_PHOTOS} фото!</b>\n\n"
+            "Нажмите «Готово» для проверки файлов.",
+            reply_markup=get_photo_actions_keyboard(len(existing_photos)),
+            parse_mode="HTML",
         )
         return
     
-    # Скачиваем фото
+    # Если это альбом - обрабатываем все фото сразу
+    if is_album and album:
+        photos, success_count, error_count = await process_album_photos(
+            bot, user_id, album, existing_photos
+        )
+        
+        if success_count == 0:
+            await message.answer(
+                "❌ Не удалось загрузить фотографии.\n\n"
+                f"Загружено: {len(existing_photos)}/{MAX_PHOTOS}",
+                reply_markup=get_photo_actions_keyboard(len(existing_photos)),
+                parse_mode="HTML",
+            )
+            return
+        
+        await state.update_data(photos=photos_to_state(photos))
+        
+        logger.info(
+            "additional_album_received",
+            telegram_id=user_id,
+            album_size=len(album),
+            success=success_count,
+            total_photos=len(photos),
+        )
+        
+        if len(photos) >= MAX_PHOTOS:
+            await message.answer(
+                f"✅ <b>Загружено {len(photos)}/{MAX_PHOTOS} фото</b> (максимум)\n\n"
+                "Нажмите «Готово» для проверки файлов.",
+                reply_markup=get_photo_actions_keyboard(len(photos)),
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                f"✅ <b>Добавлено {success_count} фото!</b> ({len(photos)}/{MAX_PHOTOS})\n\n"
+                "Добавьте ещё или проверьте загруженные.",
+                reply_markup=get_photo_actions_keyboard(len(photos)),
+                parse_mode="HTML",
+            )
+        return
+    
+    # Одиночное фото
     photo = get_best_photo(message.photo)
     if not photo:
         await message.answer("❌ Не удалось получить фото.")
         return
     
-    try:
-        photo_bytes = await download_photo(bot, photo)
-        if not photo_bytes:
-            raise ValueError("Empty photo data")
-    except Exception as e:
-        logger.error("Failed to download additional photo", error=str(e))
+    temp_photo, error = await process_and_save_photo(
+        bot, user_id, photo, existing_photos
+    )
+    
+    if not temp_photo:
         await message.answer(
-            "❌ Не удалось загрузить фото. Попробуйте ещё раз.",
+            f"❌ {error or 'Не удалось загрузить фото'}. Попробуйте ещё раз.",
+            parse_mode="HTML",
         )
         return
     
-    # Добавляем в список
-    photos.append({
-        "bytes": photo_bytes,
-        "file_id": photo.file_id,
-        "file_unique_id": photo.file_unique_id,
-    })
-    await state.update_data(photos=photos)
+    photos = existing_photos + [temp_photo]
+    await state.update_data(photos=photos_to_state(photos))
     
     logger.info(
-        "Additional photo received",
-        telegram_id=message.from_user.id if message.from_user else 0,
+        "additional_photo_received",
+        telegram_id=user_id,
         photo_count=len(photos),
     )
     
-    # Обновляем сообщение
     if len(photos) >= MAX_PHOTOS:
         await message.answer(
-            f"✅ *Загружено {len(photos)}/{MAX_PHOTOS} фото* (максимум)\n\n"
-            "Нажмите «Продолжить» для выбора категории.",
+            f"✅ <b>Загружено {len(photos)}/{MAX_PHOTOS} фото</b> (максимум)\n\n"
+            "Нажмите «Готово» для проверки файлов.",
             reply_markup=get_photo_actions_keyboard(len(photos)),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
     else:
         await message.answer(
-            f"✅ *Фото добавлено!* ({len(photos)}/{MAX_PHOTOS})\n\n"
-            "Добавьте ещё или продолжите.",
+            f"✅ <b>Фото добавлено!</b> ({len(photos)}/{MAX_PHOTOS})\n\n"
+            "Добавьте ещё или проверьте загруженные.",
             reply_markup=get_photo_actions_keyboard(len(photos)),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
 
 
 # ============================================================
-# CALLBACK ОБРАБОТЧИКИ
+# ОБРАБОТЧИКИ ДОКУМЕНТОВ (для PNG без сжатия)
+# ============================================================
+
+@router.message(GenerationStates.waiting_photo, F.document)
+async def handle_first_document(
+    message: Message,
+    bot: Bot,
+    state: FSMContext,
+    user: User,
+) -> None:
+    """
+    Обработка первого фото как документа.
+    
+    Позволяет загружать PNG без сжатия.
+    """
+    document = message.document
+    if not document:
+        return
+    
+    user_id = message.from_user.id if message.from_user else 0
+    
+    # Проверяем MIME-type
+    mime_type = document.mime_type or ""
+    if mime_type not in ("image/jpeg", "image/png"):
+        # Проверяем расширение файла
+        filename = document.file_name or ""
+        ext = filename.lower().split(".")[-1] if "." in filename else ""
+        if ext not in ("jpeg", "jpg", "png"):
+            await message.answer(INVALID_FORMAT_MESSAGE, parse_mode="HTML")
+            return
+    
+    # Очищаем предыдущие временные файлы
+    clear_user_temp_files(user_id)
+    
+    # Скачиваем документ
+    file_bytes = await download_document(bot, document)
+    if not file_bytes:
+        await message.answer("❌ Не удалось загрузить файл. Попробуйте ещё раз.")
+        return
+    
+    # Сохраняем
+    temp_photo, error = save_temp_photo(
+        user_id=user_id,
+        file_bytes=file_bytes,
+        original_filename=document.file_name,
+        mime_type=mime_type,
+    )
+    
+    if not temp_photo:
+        if "Неподдерживаемый формат" in error:
+            await message.answer(INVALID_FORMAT_MESSAGE, parse_mode="HTML")
+        else:
+            await message.answer(f"❌ {error}")
+        return
+    
+    await state.update_data(photos=photos_to_state([temp_photo]))
+    await state.set_state(GenerationStates.waiting_more_photos)
+    
+    logger.info(
+        "document_photo_received",
+        telegram_id=user_id,
+        filename=temp_photo.filename,
+        format=temp_photo.format_display,
+    )
+    
+    await message.answer(
+        f"✅ <b>Файл загружен!</b> (1/{MAX_PHOTOS})\n\n"
+        f"📄 <code>{temp_photo.filename}</code>\n\n"
+        "Вы можете добавить ещё фото или проверить загруженные.",
+        reply_markup=get_photo_actions_keyboard(1),
+        parse_mode="HTML",
+    )
+
+
+@router.message(GenerationStates.waiting_more_photos, F.document)
+async def handle_additional_document(
+    message: Message,
+    bot: Bot,
+    state: FSMContext,
+) -> None:
+    """
+    Обработка дополнительного фото как документа.
+    """
+    document = message.document
+    if not document:
+        return
+    
+    user_id = message.from_user.id if message.from_user else 0
+    data = await state.get_data()
+    existing_photos = get_photos_from_state(data)
+    
+    # Проверяем лимит
+    if len(existing_photos) >= MAX_PHOTOS:
+        await message.answer(
+            f"⚠️ <b>Достигнут лимит в {MAX_PHOTOS} фото!</b>\n\n"
+            "Нажмите «Готово» для проверки файлов.",
+            reply_markup=get_photo_actions_keyboard(len(existing_photos)),
+            parse_mode="HTML",
+        )
+        return
+    
+    # Проверяем MIME-type
+    mime_type = document.mime_type or ""
+    if mime_type not in ("image/jpeg", "image/png"):
+        filename = document.file_name or ""
+        ext = filename.lower().split(".")[-1] if "." in filename else ""
+        if ext not in ("jpeg", "jpg", "png"):
+            await message.answer(INVALID_FORMAT_MESSAGE, parse_mode="HTML")
+            return
+    
+    # Скачиваем и сохраняем
+    file_bytes = await download_document(bot, document)
+    if not file_bytes:
+        await message.answer("❌ Не удалось загрузить файл. Попробуйте ещё раз.")
+        return
+    
+    temp_photo, error = save_temp_photo(
+        user_id=user_id,
+        file_bytes=file_bytes,
+        original_filename=document.file_name,
+        mime_type=mime_type,
+    )
+    
+    if not temp_photo:
+        if "Неподдерживаемый формат" in error:
+            await message.answer(INVALID_FORMAT_MESSAGE, parse_mode="HTML")
+        else:
+            await message.answer(f"❌ {error}")
+        return
+    
+    photos = existing_photos + [temp_photo]
+    await state.update_data(photos=photos_to_state(photos))
+    
+    logger.info(
+        "additional_document_received",
+        telegram_id=user_id,
+        photo_count=len(photos),
+        filename=temp_photo.filename,
+    )
+    
+    if len(photos) >= MAX_PHOTOS:
+        await message.answer(
+            f"✅ <b>Загружено {len(photos)}/{MAX_PHOTOS} фото</b> (максимум)\n\n"
+            "Нажмите «Готово» для проверки файлов.",
+            reply_markup=get_photo_actions_keyboard(len(photos)),
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            f"✅ <b>Файл добавлен!</b> ({len(photos)}/{MAX_PHOTOS})\n\n"
+            "Добавьте ещё или проверьте загруженные.",
+            reply_markup=get_photo_actions_keyboard(len(photos)),
+            parse_mode="HTML",
+        )
+
+
+# ============================================================
+# CALLBACK ОБРАБОТЧИКИ - ПОДТВЕРЖДЕНИЕ И УДАЛЕНИЕ
 # ============================================================
 
 @router.callback_query(GenerationStates.waiting_more_photos, F.data == "add_more_photos")
@@ -216,47 +650,195 @@ async def callback_add_more(callback: CallbackQuery) -> None:
     await callback.answer()
     if callback.message:
         await callback.message.edit_text(
-            "📷 *Отправьте ещё фото товара*\n\n"
-            "Покажите товар с разных сторон для лучшего результата.",
-            parse_mode="Markdown",
+            "📷 <b>Отправьте ещё фото товара</b>\n\n"
+            "Покажите товар с разных сторон для лучшего результата.\n\n"
+            "Поддерживаемые форматы: <b>JPEG</b>, <b>PNG</b>",
+            parse_mode="HTML",
         )
 
 
-@router.callback_query(GenerationStates.waiting_more_photos, F.data == "continue_generation")
-async def callback_continue(
+@router.callback_query(GenerationStates.waiting_more_photos, F.data == "confirm_photos")
+async def callback_confirm_photos(
     callback: CallbackQuery,
     state: FSMContext,
 ) -> None:
     """
-    Кнопка "Продолжить" - переход к выбору категории.
+    Кнопка "Готово — проверить файлы".
     
-    Проверяет что есть хотя бы одно фото.
+    Показывает список загруженных файлов и предлагает удалить лишние.
     """
     data = await state.get_data()
-    photos = data.get("photos", [])
+    photos = get_photos_from_state(data)
     
     if not photos:
         await callback.answer("❌ Сначала загрузите хотя бы одно фото!", show_alert=True)
         return
     
     await callback.answer()
+    await state.set_state(GenerationStates.confirming_photos)
+    
+    if callback.message:
+        await callback.message.edit_text(
+            format_confirmation_message(photos),
+            reply_markup=get_photo_confirmation_keyboard(),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(GenerationStates.confirming_photos, F.data == "delete_photos_menu")
+async def callback_delete_menu(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """
+    Показать меню выбора фото для удаления.
+    """
+    data = await state.get_data()
+    photos = get_photos_from_state(data)
+    
+    if not photos:
+        await callback.answer("Нет фото для удаления", show_alert=True)
+        return
+    
+    await callback.answer()
+    await state.set_state(GenerationStates.deleting_photo)
+    
+    file_list = format_file_list(photos)
+    
+    if callback.message:
+        await callback.message.edit_text(
+            f"🗑 <b>Выберите номер файла для удаления:</b>\n\n"
+            f"{file_list}",
+            reply_markup=get_photo_delete_keyboard(len(photos)),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(GenerationStates.deleting_photo, F.data.startswith("delete_photo:"))
+async def callback_delete_photo(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """
+    Удаление конкретного фото по номеру.
+    """
+    photo_number = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id if callback.from_user else 0
+    
+    data = await state.get_data()
+    photos = get_photos_from_state(data)
+    
+    if photo_number < 1 or photo_number > len(photos):
+        await callback.answer("❌ Неверный номер файла", show_alert=True)
+        return
+    
+    # Удаляем фото
+    photo_to_delete = photos[photo_number - 1]
+    delete_temp_photo(user_id, photo_to_delete.id)
+    
+    # Обновляем список
+    photos.pop(photo_number - 1)
+    await state.update_data(photos=photos_to_state(photos))
+    
+    await callback.answer(f"✅ Файл #{photo_number} удалён")
+    
+    logger.info(
+        "photo_deleted",
+        telegram_id=user_id,
+        deleted_filename=photo_to_delete.filename,
+        remaining_count=len(photos),
+    )
+    
+    if not photos:
+        # Все фото удалены — возвращаем к загрузке
+        await state.set_state(GenerationStates.waiting_photo)
+        if callback.message:
+            await callback.message.edit_text(
+                "📷 <b>Все фото удалены</b>\n\n"
+                "Отправьте новые фото товара для продолжения.",
+                parse_mode="HTML",
+            )
+    else:
+        # Возвращаемся к подтверждению
+        await state.set_state(GenerationStates.confirming_photos)
+        if callback.message:
+            await callback.message.edit_text(
+                format_confirmation_message(photos),
+                reply_markup=get_photo_confirmation_keyboard(),
+                parse_mode="HTML",
+            )
+
+
+@router.callback_query(GenerationStates.deleting_photo, F.data == "back_to_confirmation")
+async def callback_back_to_confirmation(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """
+    Возврат к экрану подтверждения без удаления.
+    """
+    data = await state.get_data()
+    photos = get_photos_from_state(data)
+    
+    await callback.answer()
+    await state.set_state(GenerationStates.confirming_photos)
+    
+    if callback.message:
+        await callback.message.edit_text(
+            format_confirmation_message(photos),
+            reply_markup=get_photo_confirmation_keyboard(),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(GenerationStates.confirming_photos, F.data == "photos_confirmed")
+async def callback_photos_confirmed(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """
+    Кнопка "Подтвердить" — переход к выбору категории.
+    """
+    data = await state.get_data()
+    photos = get_photos_from_state(data)
+    
+    if not photos:
+        await callback.answer("❌ Нет загруженных фото!", show_alert=True)
+        return
+    
+    await callback.answer("✅ Отлично!")
     
     # Переходим к выбору категории
     await state.set_state(GenerationStates.waiting_category)
     
     if callback.message:
         await callback.message.edit_text(
-            f"📸 *Загружено фото: {len(photos)}*\n\n"
+            f"📸 <b>Загружено фото: {len(photos)}</b>\n\n"
             "Выберите категорию товара:",
             reply_markup=get_category_keyboard(),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
     
     logger.info(
-        "Photos confirmed, waiting for category",
+        "photos_confirmed",
         telegram_id=callback.from_user.id if callback.from_user else 0,
         photo_count=len(photos),
     )
+
+
+# ============================================================
+# CALLBACK ОБРАБОТЧИКИ - СТАРЫЕ (для совместимости)
+# ============================================================
+
+@router.callback_query(GenerationStates.waiting_more_photos, F.data == "continue_generation")
+async def callback_continue_legacy(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """
+    Старая кнопка "Продолжить" — редирект на новый флоу.
+    """
+    await callback_confirm_photos(callback, state)
 
 
 @router.callback_query(F.data == "cancel")
@@ -266,16 +848,19 @@ async def callback_cancel(
 ) -> None:
     """Отмена текущего действия."""
     current_state = await state.get_state()
+    user_id = callback.from_user.id if callback.from_user else 0
     
     if current_state:
+        # Очищаем временные файлы
+        clear_user_temp_files(user_id)
         await state.clear()
         await callback.answer("Действие отменено")
         if callback.message:
             await callback.message.edit_text("❌ Генерация отменена.")
             await callback.message.answer(
-                "Нажмите 📸 *Создать ТЗ*, чтобы начать заново.",
-                reply_markup=get_main_keyboard(),
-                parse_mode="Markdown",
+                "Нажмите 🚀 <b>Создать ТЗ</b>, чтобы начать заново.",
+                reply_markup=get_main_menu_keyboard(),
+                parse_mode="HTML",
             )
     else:
         await callback.answer("Нечего отменять")
@@ -285,28 +870,63 @@ async def callback_cancel(
 # ОБРАБОТЧИКИ ОШИБОК ВВОДА
 # ============================================================
 
-@router.message(GenerationStates.waiting_photo, ~F.photo)
+@router.message(GenerationStates.waiting_photo, ~F.photo & ~F.document)
 async def handle_not_photo_first(message: Message) -> None:
     """Если вместо первого фото пришло что-то другое."""
     await message.answer(
-        "📷 Пожалуйста, отправьте *фото* товара.\n\n"
-        "Поддерживаются только изображения.",
-        parse_mode="Markdown",
+        PHOTO_UPLOAD_PROMPT,
+        parse_mode="HTML",
     )
 
 
-@router.message(GenerationStates.waiting_more_photos, ~F.photo)
+@router.message(GenerationStates.waiting_more_photos, ~F.photo & ~F.document)
 async def handle_not_photo_more(
     message: Message,
     state: FSMContext,
 ) -> None:
     """Если вместо дополнительного фото пришло что-то другое."""
     data = await state.get_data()
-    photos = data.get("photos", [])
+    photos = get_photos_from_state(data)
     
     await message.answer(
-        f"📷 Отправьте *фото* или нажмите кнопку ниже.\n\n"
+        f"📷 Отправьте <b>фото</b> или нажмите кнопку ниже.\n\n"
         f"Загружено: {len(photos)}/{MAX_PHOTOS}",
         reply_markup=get_photo_actions_keyboard(len(photos)),
-        parse_mode="Markdown",
+        parse_mode="HTML",
+    )
+
+
+@router.message(GenerationStates.confirming_photos)
+async def handle_message_in_confirmation(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    """Любое сообщение в режиме подтверждения."""
+    data = await state.get_data()
+    photos = get_photos_from_state(data)
+    
+    await message.answer(
+        format_confirmation_message(photos),
+        reply_markup=get_photo_confirmation_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(GenerationStates.deleting_photo)
+async def handle_message_in_deletion(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    """Любое сообщение в режиме удаления."""
+    data = await state.get_data()
+    photos = get_photos_from_state(data)
+    
+    file_list = format_file_list(photos)
+    
+    await message.answer(
+        f"🗑 <b>Выберите номер файла для удаления:</b>\n\n"
+        f"{file_list}\n\n"
+        "Используйте кнопки ниже.",
+        reply_markup=get_photo_delete_keyboard(len(photos)),
+        parse_mode="HTML",
     )

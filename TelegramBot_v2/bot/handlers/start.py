@@ -13,9 +13,16 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 import structlog
 
-from database import get_user_stats, get_user_generations
+from database import get_user_stats, get_user_generations, get_generation_by_id
 from database.models import User
-from bot.keyboards import get_main_keyboard, get_balance_keyboard, get_start_inline_keyboard
+from bot.keyboards import (
+    get_main_menu_keyboard,
+    get_balance_keyboard,
+    get_start_inline_keyboard,
+    get_history_keyboard,
+    get_tz_detail_keyboard,
+    get_back_keyboard,
+)
 from bot.states import GenerationStates
 
 
@@ -76,7 +83,7 @@ HELP_MESSAGE = """
 📷 Покажи товар с разных сторон
 📷 Добавь фото упаковки
 
-Вопросы? Напиши @tzshnik_support
+Вопросы? Напиши @TZshnik_support_bot
 """
 
 BALANCE_MESSAGE = """
@@ -98,7 +105,7 @@ MENU_MESSAGE = """
 
 ━━━━━━━━━━━━━━━━━━━━━
 
-🚀 <b>Создать ТЗ</b> — начать генерацию нового технического задания
+🚀 <b>Создать ТЗ</b> — создать новое техническое задание
 
 💰 <b>Баланс</b> — проверить количество оставшихся генераций и пополнить
 
@@ -109,13 +116,22 @@ MENU_MESSAGE = """
 ━━━━━━━━━━━━━━━━━━━━━
 
 💳 <b>Тарифы:</b>
-🔹 Старт — 5 ТЗ за 149₽
-⭐ Оптимальный — 20 ТЗ за 399₽  
-🚀 Профи — 50 ТЗ за 699₽
+🎁 Пробный — 3 ТЗ за 79₽
+🔹 Старт — 5 ТЗ за 129₽
+📦 Базовый — 10 ТЗ за 229₽
+⭐ Оптимальный — 25 ТЗ за 449₽ 🔥
+🚀 Профи — 50 ТЗ за 749₽
+💼 Бизнес — 100 ТЗ за 1 290₽ 💎
+🏢 Корпоративный — 250 ТЗ за 2 790₽
 
 ━━━━━━━━━━━━━━━━━━━━━
 
-❓ Поддержка: @tzshnik_support
+👑 <b>БЕЗЛИМИТ</b> — 1 790₽/месяц
+    Неограниченные генерации на 30 дней!
+
+━━━━━━━━━━━━━━━━━━━━━
+
+❓ Поддержка: @TZshnik_support_bot
 """
 
 EXAMPLES_MESSAGE = """
@@ -824,10 +840,9 @@ async def cmd_start(
     # Сбрасываем состояние на случай если пользователь был в процессе
     await state.clear()
     
-    # Отправляем стартовое сообщение с Reply клавиатурой
+    # Отправляем стартовое сообщение с inline клавиатурой
     await message.answer(
         START_MESSAGE.format(balance=user.balance),
-        reply_markup=get_main_keyboard(),
     )
     
     # Отправляем дополнительное сообщение с inline кнопками для быстрого старта
@@ -846,12 +861,114 @@ async def cmd_start(
 @router.message(Command("help"))
 async def cmd_help(message: Message, user: User) -> None:
     """Обработчик команды /help."""
-    from bot.config import settings
+    from database.admin_crud import get_bot_setting
+    
+    free_credits = await get_bot_setting("free_credits", "1")
     
     await message.answer(
-        HELP_MESSAGE.format(free_credits=settings.free_credits),
-        reply_markup=get_main_keyboard(),
+        HELP_MESSAGE.format(free_credits=free_credits),
+        reply_markup=get_main_menu_keyboard(),
     )
+
+
+@router.message(Command("create"))
+async def cmd_create(
+    message: Message,
+    user: User,
+    state: FSMContext,
+) -> None:
+    """Команда /create - начать создание ТЗ."""
+    if user.balance <= 0:
+        await message.answer(
+            "❌ <b>У тебя закончились кредиты!</b>\n\n"
+            "Нажми «💰 Баланс» или /buy для пополнения.",
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return
+    
+    await state.set_state(GenerationStates.waiting_photo)
+    await state.update_data(photos=[])
+    
+    await message.answer(
+        "📷 <b>Отправь фото товара</b>\n\n"
+        "Можно отправить от 1 до 5 фотографий.\n"
+        "Чем больше фото с разных ракурсов — тем лучше результат!\n\n"
+        "💡 Совет: добавь фото упаковки и деталей товара",
+    )
+    
+    logger.info("User started generation via /create", telegram_id=message.from_user.id)
+
+
+@router.message(Command("balance"))
+async def cmd_balance(message: Message, user: User) -> None:
+    """Команда /balance - показать баланс."""
+    telegram_id = message.from_user.id if message.from_user else 0
+    stats = await get_user_stats(telegram_id)
+    
+    if user.balance > 5:
+        status_text = "✅ Достаточно кредитов для работы"
+    elif user.balance > 0:
+        status_text = "⚠️ Кредиты заканчиваются, пополните баланс"
+    else:
+        status_text = "❌ Кредиты закончились! Пополните баланс"
+    
+    text = BALANCE_MESSAGE.format(
+        balance=user.balance,
+        total_generations=stats.get("total_generations", 0),
+        successful=stats.get("successful_generations", 0),
+        status_text=status_text,
+    )
+    
+    await message.answer(text, reply_markup=get_balance_keyboard())
+
+
+@router.message(Command("buy"))
+async def cmd_buy(message: Message, user: User) -> None:
+    """Команда /buy - купить кредиты."""
+    from bot.handlers.payments import show_packages
+    
+    # Имитируем callback для показа пакетов
+    class FakeCallback:
+        from_user = message.from_user
+        message = message
+        async def answer(self, *args, **kwargs): pass
+    
+    await show_packages(FakeCallback(), user)
+
+
+@router.message(Command("history"))
+async def cmd_history(message: Message, user: User) -> None:
+    """Команда /history - история генераций."""
+    telegram_id = message.from_user.id if message.from_user else 0
+    generations = await get_user_generations(telegram_id, limit=10)
+    
+    if not generations:
+        await message.answer(
+            "📋 <b>История генераций</b>\n\n"
+            "У тебя пока нет созданных ТЗ.\n"
+            "Нажми «🚀 Создать ТЗ» или /create чтобы начать!",
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return
+    
+    text = "📋 <b>Последние генерации:</b>\n\n"
+    
+    for gen in generations:
+        date_str = gen.created_at.strftime("%d.%m.%Y %H:%M")
+        category_emoji = {
+            "clothes": "👕",
+            "electronics": "📱",
+            "cosmetics": "💄",
+            "home": "🏠",
+            "kids": "👶",
+            "sports": "⚽",
+            "other": "📦",
+        }.get(gen.category, "📦")
+        
+        quality = gen.quality_score or 0
+        text += f"{category_emoji} {date_str} — {quality}/100\n"
+    
+    await message.answer(text, reply_markup=get_main_menu_keyboard())
 
 
 # ============================================================
@@ -874,7 +991,7 @@ async def btn_create_tz(
         await message.answer(
             "❌ <b>У тебя закончились кредиты!</b>\n\n"
             "Нажми «💰 Баланс» для пополнения.",
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_menu_keyboard(),
         )
         return
     
@@ -887,7 +1004,6 @@ async def btn_create_tz(
         "Можно отправить от 1 до 5 фотографий.\n"
         "Чем больше фото с разных ракурсов — тем лучше результат!\n\n"
         "💡 Совет: добавь фото упаковки и деталей товара",
-        reply_markup=get_main_keyboard(),
     )
     
     logger.info(
@@ -942,23 +1058,27 @@ async def btn_history(
             "📋 <b>Мои ТЗ</b>\n\n"
             "У тебя пока нет созданных ТЗ.\n"
             "Нажми «🚀 Создать ТЗ», чтобы начать!",
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_history_keyboard(),
         )
         return
     
     # Формируем список генераций
-    lines = ["📋 <b>Мои последние ТЗ:</b>\n"]
+    lines = [
+        "📋 <b>Мои последние ТЗ:</b>\n",
+        "Нажми на ТЗ, чтобы скачать или посмотреть подробности:\n",
+    ]
     
-    for gen in generations:
-        status_emoji = "✅" if gen.status == "completed" else "❌"
+    for i, gen in enumerate(generations[:5], 1):
         category = gen.category or "Без категории"
         date_str = gen.created_at.strftime("%d.%m %H:%M")
-        
-        lines.append(f"{status_emoji} {date_str} — {category}")
+        lines.append(f"{i}. ✅ {date_str} — {category}")
+    
+    if len(generations) > 5:
+        lines.append(f"\n<i>Показаны последние 5 из {len(generations)} ТЗ</i>")
     
     await message.answer(
         "\n".join(lines),
-        reply_markup=get_main_keyboard(),
+        reply_markup=get_history_keyboard(generations),
     )
 
 
@@ -1009,7 +1129,7 @@ async def callback_start_generation(
     user: User,
     state: FSMContext,
 ) -> None:
-    """Callback для кнопки 'Начать генерацию'."""
+    """Callback для кнопки 'Создать ТЗ'."""
     await callback.answer()
     
     # Проверяем баланс
@@ -1102,39 +1222,67 @@ async def callback_show_main_menu(callback: CallbackQuery, user: User) -> None:
 
 @router.callback_query(F.data == "show_balance")
 async def callback_show_balance(callback: CallbackQuery, user: User) -> None:
-    """Callback для кнопки 'Баланс'."""
+    """Callback для кнопки 'Баланс' — профессиональный экран баланса."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    
     await callback.answer()
     
     telegram_id = callback.from_user.id if callback.from_user else 0
     stats = await get_user_stats(telegram_id)
     
-    # Формируем текст статуса
-    if user.balance > 5:
+    # Определяем эмодзи и статус баланса
+    if user.balance >= 10:
+        balance_emoji = "🟢"
         status_text = "✅ Достаточно кредитов для работы"
     elif user.balance > 0:
-        status_text = "⚠️ Кредиты заканчиваются"
+        balance_emoji = "🟡"
+        status_text = "⚠️ Кредиты заканчиваются — пополните баланс"
     else:
+        balance_emoji = "🔴"
         status_text = "❌ Кредиты закончились!"
     
-    # Подсчитываем успешные генерации
+    # Подсчитываем генерации
     total = stats.get("generations_count", 0)
     
-    await callback.message.edit_text(
-        BALANCE_MESSAGE.format(
-            balance=user.balance,
-            total_generations=total,
-            successful=total,
-            status_text=status_text,
-        ),
-        reply_markup=get_balance_keyboard(),
+    # Формируем профессиональное сообщение о балансе
+    text = (
+        f"💰 <b>Ваш баланс</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{balance_emoji} <b>{user.balance} кредитов</b>\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"   • Сгенерировано ТЗ: {total}\n"
+        f"   • Дата регистрации: {user.created_at.strftime('%d.%m.%Y')}\n\n"
+        f"{status_text}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💳 <b>Пополнить баланс:</b>\n"
     )
+    
+    # Показываем выгодные тарифы
+    if user.balance < 5:
+        text += (
+            f"\n🔥 <b>Рекомендуем:</b>\n"
+            f"   ⭐ Оптимальный — 25 ТЗ за 449₽ (экономия 40%)\n"
+            f"   👑 Безлимит — 1 790₽/месяц без ограничений\n"
+        )
+    
+    # Создаём клавиатуру
+    builder = InlineKeyboardBuilder()
+    builder.button(text="💳 Пополнить баланс", callback_data="show_packages")
+    builder.button(text="📋 История покупок", callback_data="payment_history")
+    builder.button(text="📖 В главное меню", callback_data="show_main_menu")
+    builder.adjust(2, 1)
+    
+    if callback.message:
+        await callback.message.edit_text(
+            text=text,
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+        )
 
 
 @router.callback_query(F.data == "show_history")
 async def callback_show_history(callback: CallbackQuery, user: User) -> None:
     """Callback для кнопки 'Мои ТЗ'."""
-    from bot.keyboards import get_history_keyboard
-    
     await callback.answer()
     
     telegram_id = callback.from_user.id if callback.from_user else 0
@@ -1150,18 +1298,99 @@ async def callback_show_history(callback: CallbackQuery, user: User) -> None:
         return
     
     # Формируем список генераций
-    lines = ["📋 <b>Мои последние ТЗ:</b>\n"]
+    lines = [
+        "📋 <b>Мои последние ТЗ:</b>\n",
+        "Нажми на ТЗ, чтобы скачать или посмотреть подробности:\n",
+    ]
     
-    for gen in generations:
-        status_emoji = "✅" if gen.status == "completed" else "❌"
+    for i, gen in enumerate(generations[:5], 1):
         category = gen.category or "Без категории"
         date_str = gen.created_at.strftime("%d.%m %H:%M")
-        
-        lines.append(f"{status_emoji} {date_str} — {category}")
+        lines.append(f"{i}. ✅ {date_str} — {category}")
+    
+    if len(generations) > 5:
+        lines.append(f"\n<i>Показаны последние 5 из {len(generations)} ТЗ</i>")
     
     await callback.message.edit_text(
         "\n".join(lines),
-        reply_markup=get_history_keyboard(),
+        reply_markup=get_history_keyboard(generations),
+    )
+
+
+@router.callback_query(F.data.startswith("view_tz:"))
+async def callback_view_tz(callback: CallbackQuery, user: User) -> None:
+    """Callback для просмотра конкретного ТЗ."""
+    await callback.answer()
+    
+    if not callback.data:
+        return
+    
+    generation_id = int(callback.data.split(":")[1])
+    generation = await get_generation_by_id(generation_id)
+    
+    if not generation:
+        await callback.message.edit_text(
+            "❌ ТЗ не найдено",
+            reply_markup=get_history_keyboard(),
+        )
+        return
+    
+    category = generation.category or "Без категории"
+    date_str = generation.created_at.strftime("%d.%m.%Y %H:%M")
+    
+    # Формируем сообщение с информацией о ТЗ
+    text = (
+        f"📄 <b>Техническое задание #{generation.id}</b>\n\n"
+        f"📁 <b>Категория:</b> {category}\n"
+        f"📅 <b>Дата создания:</b> {date_str}\n"
+    )
+    
+    if generation.quality_score:
+        text += f"⭐ <b>Оценка качества:</b> {generation.quality_score}/100\n"
+    
+    # Добавляем краткую выдержку из ТЗ (первые 500 символов)
+    if generation.tz_text:
+        preview = generation.tz_text[:500]
+        if len(generation.tz_text) > 500:
+            preview += "..."
+        text += f"\n<b>Превью:</b>\n<code>{preview}</code>\n"
+    
+    text += (
+        "\n💡 <i>Нажми «Скачать PDF» для полной версии</i>\n\n"
+        "────────────────────\n"
+        "🎁 <b>Предложи идею</b> — за оригинальную идею\n"
+        "или клёвую правку дам <b>+2 лимита</b> в знак благодарности!"
+    )
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_tz_detail_keyboard(generation_id),
+    )
+
+
+@router.callback_query(F.data == "suggest_idea")
+async def callback_suggest_idea(callback: CallbackQuery) -> None:
+    """Callback для кнопки 'Предложить идею'."""
+    from bot.config import settings
+    
+    await callback.answer()
+    
+    # Получаем username админа из конфига
+    admin_contact = f"@{settings.admin_username}" if hasattr(settings, 'admin_username') and settings.admin_username else "администратору"
+    
+    await callback.message.edit_text(
+        "💡 <b>Предложить идею</b>\n\n"
+        "Есть классная идея или предложение по улучшению бота?\n"
+        "Нашёл баг или хочешь предложить новую функцию?\n\n"
+        f"📩 Напиши {admin_contact}\n\n"
+        "🎁 <b>За оригинальную идею или клёвую правку</b>\n"
+        "получишь <b>+2 бесплатных лимита</b> в знак благодарности!\n\n"
+        "Примеры идей:\n"
+        "• Новая категория товаров\n"
+        "• Улучшение формата ТЗ\n"
+        "• Новая полезная функция\n"
+        "• Исправление ошибок",
+        reply_markup=get_back_keyboard("show_history"),
     )
 
 

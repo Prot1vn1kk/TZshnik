@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     telegram_bot_token: str
     admin_user_id: int  # Основной админ (для обратной совместимости)
     admin_ids_str: str = ""  # Список админов через запятую: "123,456,789"
+    admin_username: str = ""  # Username админа для обратной связи (без @)
     
     # ========== AI Providers ==========
     # Gemini

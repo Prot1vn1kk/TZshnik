@@ -48,33 +48,13 @@ PACKAGES = {
 # REPLY КЛАВИАТУРЫ
 # ============================================================
 
-def get_main_keyboard() -> ReplyKeyboardMarkup:
+def get_main_keyboard() -> ReplyKeyboardRemove:
     """
-    Главная клавиатура бота.
+    Убирает reply-клавиатуру, оставляя только inline-кнопки.
     
-    Лаконичная и понятная структура:
-    - Первый ряд: главное действие
-    - Второй ряд: быстрый доступ  
-    - Третий ряд: доп. функции
+    Теперь бот использует только inline-клавиатуры для чистого интерфейса.
     """
-    builder = ReplyKeyboardBuilder()
-    
-    # Главное действие - самая заметная кнопка
-    builder.row(KeyboardButton(text="🚀 Создать ТЗ"))
-    
-    # Быстрый доступ к основным функциям
-    builder.row(
-        KeyboardButton(text="💰 Баланс"),
-        KeyboardButton(text="📋 Мои ТЗ"),
-    )
-    
-    # Дополнительные функции
-    builder.row(
-        KeyboardButton(text="📝 Примеры"),
-        KeyboardButton(text="📖 Меню"),
-    )
-    
-    return builder.as_markup(resize_keyboard=True)
+    return ReplyKeyboardRemove()
 
 
 def get_start_inline_keyboard() -> InlineKeyboardMarkup:
@@ -87,7 +67,7 @@ def get_start_inline_keyboard() -> InlineKeyboardMarkup:
     
     # Главное действие
     builder.button(
-        text="🚀 Начать генерацию",
+        text="🚀 Создать ТЗ",
         callback_data="start_generation",
     )
     
@@ -381,9 +361,24 @@ def get_example_detail_keyboard(category: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_history_keyboard() -> InlineKeyboardMarkup:
-    """Inline клавиатура для раздела истории с навигацией."""
+def get_history_keyboard(generations: list = None) -> InlineKeyboardMarkup:
+    """
+    Inline клавиатура для раздела истории с навигацией.
+    
+    Args:
+        generations: Список генераций пользователя (опционально)
+    """
     builder = InlineKeyboardBuilder()
+    
+    # Если есть генерации, добавляем кнопки для каждой
+    if generations:
+        for gen in generations[:5]:  # Показываем последние 5
+            category = gen.category or "other"
+            date_str = gen.created_at.strftime("%d.%m %H:%M")
+            builder.button(
+                text=f"📄 {date_str} — {category}",
+                callback_data=f"view_tz:{gen.id}",
+            )
     
     # Действия
     builder.button(text="🚀 Создать ещё ТЗ", callback_data="start_generation")
@@ -392,5 +387,31 @@ def get_history_keyboard() -> InlineKeyboardMarkup:
     # Навигация
     builder.button(text="📖 В главное меню", callback_data="show_main_menu")
     
-    builder.adjust(2, 1)
+    # Располагаем: по 1 кнопке для генераций, потом 2+1 для остальных
+    if generations:
+        adjust = [1] * min(len(generations), 5) + [2, 1]
+    else:
+        adjust = [2, 1]
+    builder.adjust(*adjust)
+    return builder.as_markup()
+
+
+def get_tz_detail_keyboard(generation_id: int) -> InlineKeyboardMarkup:
+    """
+    Inline клавиатура для просмотра конкретного ТЗ.
+    
+    Args:
+        generation_id: ID генерации
+    """
+    builder = InlineKeyboardBuilder()
+    
+    # Действия с ТЗ
+    builder.button(text="📥 Скачать PDF", callback_data=f"download_pdf:{generation_id}")
+    builder.button(text="💡 Предложить идею", callback_data="suggest_idea")
+    
+    # Навигация
+    builder.button(text="⬅️ Мои ТЗ", callback_data="show_history")
+    builder.button(text="📖 Главное меню", callback_data="show_main_menu")
+    
+    builder.adjust(2, 2)
     return builder.as_markup()

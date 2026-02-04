@@ -24,7 +24,7 @@ from database import (
 from database.crud import update_generation_tz
 from database.models import User
 from bot.keyboards import (
-    get_main_keyboard,
+    get_main_menu_keyboard,
     get_generation_result_keyboard,
     get_after_feedback_keyboard,
     CATEGORY_BUTTONS,
@@ -33,6 +33,7 @@ from bot.states import GenerationStates
 from core.exceptions import GenerationError
 from core.generator import GenerationResult, create_generator
 from utils.progress import ProgressTracker
+from utils.temp_files import TempPhoto, read_temp_photo, clear_user_temp_files
 
 
 logger = structlog.get_logger()
@@ -455,8 +456,22 @@ async def callback_category_selected(
             await progress.update(stage, substage)
         
         # Запускаем генерацию
-        # Извлекаем байты из фото перед передачей в генератор
-        photo_bytes_list = [photo_dict["bytes"] for photo_dict in photos]
+        # Извлекаем байты из фото (поддержка нового формата TempPhoto)
+        photo_bytes_list = []
+        for photo_dict in photos:
+            if "bytes" in photo_dict:
+                # Старый формат (bytes в памяти)
+                photo_bytes_list.append(photo_dict["bytes"])
+            elif "path" in photo_dict:
+                # Новый формат TempPhoto (файлы на диске)
+                from pathlib import Path
+                photo_bytes = read_temp_photo(Path(photo_dict["path"]))
+                if photo_bytes:
+                    photo_bytes_list.append(photo_bytes)
+        
+        if not photo_bytes_list:
+            raise GenerationError("Не удалось прочитать фотографии")
+        
         result: GenerationResult = await generator.generate(
             photos=photo_bytes_list,
             category=category,
@@ -466,11 +481,15 @@ async def callback_category_selected(
         if not result.success:
             raise GenerationError(result.error_message or "Generation failed")
         
-        # Получаем file_id из фото
-        photo_file_ids = [
-            (p.get("file_id", ""), p.get("file_unique_id", ""))
-            for p in photos
-        ]
+        # Получаем file_id из фото (поддержка старого и нового формата)
+        photo_file_ids = []
+        for p in photos:
+            if "file_id" in p:
+                # Старый формат
+                photo_file_ids.append((p.get("file_id", ""), p.get("file_unique_id", "")))
+            elif "id" in p:
+                # Новый формат TempPhoto - используем id как идентификатор
+                photo_file_ids.append((p.get("id", ""), p.get("filename", "")))
         
         # Сохраняем результат в БД
         generation = await create_generation(
@@ -482,6 +501,9 @@ async def callback_category_selected(
             photo_file_ids=photo_file_ids,
         )
         generation_id = generation.id
+        
+        # Очищаем временные файлы после успешной генерации
+        clear_user_temp_files(telegram_id)
         
         # Показываем завершение
         await progress.complete()
@@ -726,7 +748,7 @@ async def callback_new_generation(
             await callback.message.answer(
                 "❌ *У вас закончились кредиты!*\n\n"
                 "Нажмите 💳 *Купить кредиты* для пополнения.",
-                reply_markup=get_main_keyboard(),
+                reply_markup=get_main_menu_keyboard(),
                 parse_mode="Markdown",
             )
         return
@@ -739,6 +761,5 @@ async def callback_new_generation(
         await callback.message.answer(
             "📷 *Отправьте фото товара*\n\n"
             "Вы можете отправить от 1 до 5 фотографий.",
-            reply_markup=get_main_keyboard(),
             parse_mode="Markdown",
         )

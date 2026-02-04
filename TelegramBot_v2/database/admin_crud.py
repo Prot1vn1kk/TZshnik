@@ -712,9 +712,9 @@ async def get_payment_full_info(payment_id: int) -> Optional[Dict[str, Any]]:
             "amount": payment.amount,
             "credits_added": payment.credits_added,
             "status": payment.status,
-            "payment_id": payment.payment_id,
+            "payment_id": payment.telegram_payment_id,
+            "package_name": payment.package_name,
             "created_at": payment.created_at,
-            "completed_at": payment.completed_at if hasattr(payment, 'completed_at') else None,
         }
 
 

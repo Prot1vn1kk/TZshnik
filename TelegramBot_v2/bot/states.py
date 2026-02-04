@@ -15,7 +15,11 @@ class GenerationStates(StatesGroup):
     Состояния процесса генерации ТЗ.
     
     Флоу:
-    waiting_photo → waiting_more_photos → waiting_category → generating → waiting_feedback
+    waiting_photo → waiting_more_photos → confirming_photos → waiting_category → generating → waiting_feedback
+    
+    Дополнительные состояния для управления фото:
+    - confirming_photos: подтверждение загруженных фото
+    - deleting_photo: выбор фото для удаления
     """
     
     # Ожидание первого фото товара
@@ -23,6 +27,12 @@ class GenerationStates(StatesGroup):
     
     # Ожидание дополнительных фото (опционально)
     waiting_more_photos = State()
+    
+    # Подтверждение загруженных фото (список файлов + удаление)
+    confirming_photos = State()
+    
+    # Выбор фото для удаления
+    deleting_photo = State()
     
     # Выбор категории товара
     waiting_category = State()

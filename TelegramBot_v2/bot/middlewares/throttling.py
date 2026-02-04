@@ -31,20 +31,20 @@ class RateLimitConfig:
     
     # Общие лимиты (запросов в секунду)
     # ВАЖНО: rate = количество запросов в секунду
-    # Например, rate=5 означает минимальный интервал 0.2 секунды (200мс)
-    message_rate: float = 3.0          # 3 сообщения в секунду (интервал 333мс)
-    callback_rate: float = 5.0         # 5 callback в секунду (интервал 200мс)
+    # Например, rate=10 означает минимальный интервал 0.1 секунды (100мс)
+    message_rate: float = 10.0         # 10 сообщений в секунду (интервал 100мс)
+    callback_rate: float = 15.0        # 15 callback в секунду (интервал ~67мс)
     
     # Лимиты для "тяжёлых" действий (защита от злоупотреблений)
-    generation_rate: float = 0.2       # 1 генерация в 5 секунд (требует API вызов)
-    photo_rate: float = 2.0            # 2 фото в секунду
-    payment_rate: float = 0.5          # 1 платёж в 2 секунды
+    generation_rate: float = 1.0       # 1 генерация в секунду
+    photo_rate: float = 10.0           # 10 фото в секунду
+    payment_rate: float = 2.0          # 2 платежа в секунду
     
     # Время бана при превышении лимита (секунды)
-    ban_duration: float = 30.0         # Сократили с 60 до 30 секунд
+    ban_duration: float = 10.0         # Сократили до 10 секунд
     
     # Порог для логирования подозрительной активности
-    suspicious_threshold: int = 20     # Увеличили с 10 до 20
+    suspicious_threshold: int = 50     # Увеличили до 50
     
     # Время жизни записи в кэше (секунды)
     cache_ttl: float = 300.0           # 5 минут
@@ -96,6 +96,12 @@ class ThrottlingMiddleware(BaseMiddleware):
     ) -> Any:
         """Проверяет rate limit и вызывает обработчик."""
         
+        # Пропускаем проверку для сообщений из альбома (media_group)
+        # Они будут обработаны AlbumMiddleware как один запрос
+        if isinstance(event, Message) and event.media_group_id:
+            # Просто пропускаем throttling для альбомов
+            return await handler(event, data)
+        
         # Получаем user_id
         user_id = self._get_user_id(event)
         if not user_id:
@@ -126,8 +132,8 @@ class ThrottlingMiddleware(BaseMiddleware):
         if time_since_last < min_interval:
             state.violations += 1
             
-            # Банним при частых нарушениях
-            if state.violations >= 5:
+            # Банним при частых нарушениях (увеличили порог до 15)
+            if state.violations >= 15:
                 state.banned_until = current_time + self.config.ban_duration
                 logger.warning(
                     "rate_limit_user_banned",

@@ -14,7 +14,7 @@ import structlog
 
 from database.models import User
 from database import get_user_payments
-from bot.keyboards import get_main_keyboard
+from bot.keyboards import get_main_menu_keyboard
 
 
 logger = structlog.get_logger()
@@ -88,7 +88,7 @@ async def callback_back(
         )
         await callback.message.answer(
             "Выберите действие:",
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_menu_keyboard(),
         )
 
 
@@ -115,7 +115,7 @@ async def handle_unknown(message: Message, state: FSMContext) -> None:
         # Обычный режим
         await message.answer(
             "👋 Используйте кнопки меню или команду /start",
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_menu_keyboard(),
         )
     
     logger.debug(

@@ -1,0 +1,37 @@
+[Unit]
+Description=ТЗшник v2.0 Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+
+# Рабочая директория (измените на ваш путь!)
+WorkingDirectory=/home/user/TelegramBot_v2
+
+# Путь к Python в виртуальном окружении
+ExecStart=/home/user/TelegramBot_v2/venv/bin/python -m bot
+
+# Автоперезапуск при падении
+Restart=always
+RestartSec=10
+
+# Лимиты ресурсов (для экономии на слабом VPS)
+MemoryMax=256M
+CPUQuota=50%
+
+# Переменные окружения
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Логирование
+StandardOutput=append:/home/user/TelegramBot_v2/logs/bot.log
+StandardError=append:/home/user/TelegramBot_v2/logs/error.log
+
+# Graceful shutdown
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

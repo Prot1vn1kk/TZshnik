@@ -6,15 +6,18 @@
 - /broadcast - рассылка всем пользователям
 """
 
+import asyncio
 import structlog
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from bot.config import settings
 from database import get_admin_stats
 from database.models import User
+from database.database import get_session
 
 
 logger = structlog.get_logger()
@@ -37,7 +40,6 @@ def is_admin(message: Message) -> bool:
 @router.message(Command("stats"))
 async def cmd_stats(
     message: Message,
-    session: AsyncSession,
 ) -> None:
     """
     Показать статистику бота (только для админов).
@@ -53,7 +55,7 @@ async def cmd_stats(
         return
     
     try:
-        stats = await get_admin_stats(session)
+        stats = await get_admin_stats()
         
         # Форматируем статистику
         text = (
@@ -98,7 +100,6 @@ async def cmd_stats(
 @router.message(Command("users"))
 async def cmd_users(
     message: Message,
-    session: AsyncSession,
 ) -> None:
     """Показать последних пользователей (для админа)."""
     if not is_admin(message):
@@ -106,7 +107,6 @@ async def cmd_users(
         return
     
     try:
-        from database.database import get_session
         from sqlalchemy import select, desc
         
         async with get_session() as sess:
@@ -146,7 +146,7 @@ async def cmd_users(
 @router.message(Command("broadcast"))
 async def cmd_broadcast(
     message: Message,
-    session: AsyncSession,
+    bot: Bot,
 ) -> None:
     """
     Рассылка сообщения всем пользователям (для админа).
@@ -174,19 +174,77 @@ async def cmd_broadcast(
         )
         return
     
-    # Подтверждение
-    await message.answer(
-        f"📢 <b>Подготовка рассылки</b>\n\n"
-        f"Текст:\n{broadcast_text}\n\n"
-        f"Функция рассылки будет добавлена позже.",
-        parse_mode="HTML",
-    )
-    
-    logger.info(
-        "Broadcast initiated",
-        admin_id=message.from_user.id,
-        text_length=len(broadcast_text),
-    )
+    # Получаем всех пользователей
+    try:
+        async with get_session() as session:
+            result = await session.execute(select(User.telegram_id))
+            user_ids = [row[0] for row in result.fetchall()]
+        
+        if not user_ids:
+            await message.answer("❌ Нет пользователей для рассылки.")
+            return
+        
+        total = len(user_ids)
+        
+        # Отправляем уведомление о начале
+        status_msg = await message.answer(
+            f"📢 <b>Рассылка начата...</b>\n\n"
+            f"Всего пользователей: {total}\n"
+            f"Отправлено: 0/{total}",
+            parse_mode="HTML",
+        )
+        
+        success = 0
+        failed = 0
+        
+        for i, user_id in enumerate(user_ids, 1):
+            try:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=broadcast_text,
+                    parse_mode="HTML",
+                )
+                success += 1
+            except Exception as e:
+                failed += 1
+                logger.debug("broadcast_send_failed", user_id=user_id, error=str(e))
+            
+            # Обновляем статус каждые 10 пользователей
+            if i % 10 == 0 or i == total:
+                try:
+                    await status_msg.edit_text(
+                        f"📢 <b>Рассылка в процессе...</b>\n\n"
+                        f"Отправлено: {i}/{total} ({i*100//total}%)\n"
+                        f"✅ Успешно: {success}\n"
+                        f"❌ Ошибок: {failed}",
+                        parse_mode="HTML",
+                    )
+                except:
+                    pass
+            
+            # Задержка для избежания flood control
+            await asyncio.sleep(0.05)
+        
+        # Итоговое сообщение
+        await status_msg.edit_text(
+            f"📢 <b>Рассылка завершена!</b>\n\n"
+            f"✅ Успешно: {success}\n"
+            f"❌ Неудачно: {failed}\n"
+            f"📊 Всего: {total}",
+            parse_mode="HTML",
+        )
+        
+        logger.info(
+            "Broadcast completed",
+            admin_id=message.from_user.id,
+            total=total,
+            success=success,
+            failed=failed,
+        )
+        
+    except Exception as e:
+        logger.error("Broadcast error", error=str(e))
+        await message.answer(f"❌ Ошибка рассылки: {e}")
 
 
 # Команда /admin обрабатывается в admin_panel.py

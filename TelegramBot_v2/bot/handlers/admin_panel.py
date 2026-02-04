@@ -20,7 +20,8 @@ import structlog
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.config import settings
 from bot.keyboards.admin_keyboards import (
@@ -1448,6 +1449,73 @@ async def callback_set_free_credits(callback: CallbackQuery, state: FSMContext) 
         await callback.answer("❌ Ошибка", show_alert=True)
 
 
+@router.callback_query(F.data == "admin:reset_revenue_stats")
+async def callback_reset_revenue_stats(callback: CallbackQuery, state: FSMContext) -> None:
+    """Сбросить статистику прибыли."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    
+    # Показываем подтверждение
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Да, сбросить",
+            callback_data="admin:confirm_reset_revenue",
+        ),
+        InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data="admin:settings",
+        ),
+    )
+    
+    await callback.message.edit_text(
+        "🗑 <b>СБРОС СТАТИСТИКИ ПРИБЫЛИ</b>\n\n"
+        "⚠️ <b>Внимание!</b> Это действие удалит ВСЕ записи о платежах.\n\n"
+        "Вы уверены?",
+        reply_markup=builder.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:confirm_reset_revenue")
+async def callback_confirm_reset_revenue(callback: CallbackQuery, state: FSMContext) -> None:
+    """Подтверждение сброса статистики прибыли."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    
+    try:
+        from database.database import get_session
+        from database.models import Payment
+        from sqlalchemy import delete
+        
+        async with get_session() as session:
+            # Удаляем все платежи
+            await session.execute(delete(Payment))
+            await session.commit()
+        
+        # Логируем действие
+        await log_admin_action(
+            admin_id=callback.from_user.id,
+            action_type="reset_revenue",
+            description="Сброс статистики прибыли",
+        )
+        
+        await callback.answer("✅ Статистика прибыли сброшена", show_alert=True)
+        
+        logger.info(
+            "revenue_stats_reset",
+            admin_id=callback.from_user.id,
+        )
+        
+        await callback_settings(callback, state)
+        
+    except Exception as e:
+        logger.error("reset_revenue_error", error=str(e))
+        await callback.answer("❌ Ошибка сброса статистики", show_alert=True)
+
+
 @router.callback_query(F.data == "admin:check_ai")
 async def callback_check_ai(callback: CallbackQuery, state: FSMContext) -> None:
     """Проверить статус AI провайдеров."""
@@ -1513,6 +1581,19 @@ async def callback_logs_level(callback: CallbackQuery, state: FSMContext) -> Non
     """Установить фильтр уровня логов."""
     level = callback.data.split(":")[-1]
     
+    # Получаем текущий фильтр
+    data = await state.get_data()
+    current_filter = data.get("logs_level_filter")
+    
+    # Определяем новый фильтр
+    new_filter = None if level == "all" else level
+    
+    # Если фильтр не изменился, просто отвечаем на callback
+    if current_filter == new_filter:
+        await callback.answer()
+        return
+    
+    # Обновляем фильтр
     if level == "all":
         await state.update_data(logs_level_filter=None)
     else:
@@ -1869,3 +1950,150 @@ async def handle_custom_credits_input(message: Message, state: FSMContext) -> No
         logger.error("custom_credits_error", error=str(e))
         await message.answer("❌ Ошибка операции")
         await state.clear()
+
+
+# ============================================================
+# ПЛАТЕЖИ И ГЕНЕРАЦИИ ПОЛЬЗОВАТЕЛЯ
+# ============================================================
+
+@router.callback_query(F.data.startswith("admin:user_payments:"))
+async def callback_user_payments(callback: CallbackQuery, state: FSMContext) -> None:
+    """Показать платежи конкретного пользователя."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    
+    telegram_id = int(callback.data.split(":")[-1])
+    
+    try:
+        from database.database import get_session
+        from database.models import User, Payment
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+        
+        async with get_session() as session:
+            result = await session.execute(
+                select(User)
+                .options(selectinload(User.payments))
+                .where(User.telegram_id == telegram_id)
+            )
+            user = result.scalar_one_or_none()
+        
+        if not user:
+            await callback.answer("❌ Пользователь не найден", show_alert=True)
+            return
+        
+        payments = sorted(user.payments, key=lambda p: p.created_at, reverse=True)[:10]
+        
+        if not payments:
+            text = (
+                f"💳 <b>ПЛАТЕЖИ</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"👤 Пользователь: <code>{telegram_id}</code>\n\n"
+                f"📭 Платежей пока нет"
+            )
+        else:
+            total_sum = sum(p.amount for p in user.payments) / 100
+            text = (
+                f"💳 <b>ПЛАТЕЖИ</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"👤 Пользователь: @{user.username or 'Аноним'}\n"
+                f"💰 Всего оплачено: <b>{total_sum:.0f}₽</b>\n"
+                f"📊 Транзакций: {len(user.payments)}\n\n"
+                f"<b>Последние платежи:</b>\n"
+            )
+            
+            for p in payments:
+                status_emoji = "✅" if p.status == "completed" else "⏳"
+                date_str = p.created_at.strftime("%d.%m.%Y")
+                text += f"{status_emoji} {p.amount/100:.0f}₽ — {p.credits_added} кр. ({date_str})\n"
+        
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(
+                text="⬅️ К пользователю",
+                callback_data=f"admin:user:{telegram_id}",
+            ),
+        )
+        builder.row(
+            InlineKeyboardButton(text="🏠 Меню", callback_data="admin:main"),
+        )
+        
+        await callback.message.edit_text(text, reply_markup=builder.as_markup())
+        
+    except Exception as e:
+        logger.error("user_payments_error", error=str(e), telegram_id=telegram_id)
+        await callback.answer("❌ Ошибка загрузки платежей", show_alert=True)
+    
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:user_generations:"))
+async def callback_user_generations(callback: CallbackQuery, state: FSMContext) -> None:
+    """Показать генерации конкретного пользователя."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    
+    telegram_id = int(callback.data.split(":")[-1])
+    
+    try:
+        from database.database import get_session
+        from database.models import User, Generation
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+        
+        async with get_session() as session:
+            result = await session.execute(
+                select(User)
+                .options(selectinload(User.generations))
+                .where(User.telegram_id == telegram_id)
+            )
+            user = result.scalar_one_or_none()
+        
+        if not user:
+            await callback.answer("❌ Пользователь не найден", show_alert=True)
+            return
+        
+        generations = sorted(user.generations, key=lambda g: g.created_at, reverse=True)[:10]
+        
+        if not generations:
+            text = (
+                f"📝 <b>ГЕНЕРАЦИИ</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"👤 Пользователь: <code>{telegram_id}</code>\n\n"
+                f"📭 Генераций пока нет"
+            )
+        else:
+            text = (
+                f"📝 <b>ГЕНЕРАЦИИ</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"👤 Пользователь: @{user.username or 'Аноним'}\n"
+                f"📊 Всего генераций: <b>{len(user.generations)}</b>\n\n"
+                f"<b>Последние генерации:</b>\n"
+            )
+            
+            for g in generations:
+                cat_name = CATEGORY_NAMES.get(g.category, g.category)
+                date_str = g.created_at.strftime("%d.%m.%Y")
+                score = g.quality_score or 0
+                text += f"• {cat_name} — {score}/100 ({date_str})\n"
+        
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(
+                text="⬅️ К пользователю",
+                callback_data=f"admin:user:{telegram_id}",
+            ),
+        )
+        builder.row(
+            InlineKeyboardButton(text="🏠 Меню", callback_data="admin:main"),
+        )
+        
+        await callback.message.edit_text(text, reply_markup=builder.as_markup())
+        
+    except Exception as e:
+        logger.error("user_generations_error", error=str(e), telegram_id=telegram_id)
+        await callback.answer("❌ Ошибка загрузки генераций", show_alert=True)
+    
+    await callback.answer()
