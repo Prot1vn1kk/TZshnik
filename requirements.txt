@@ -23,3 +23,7 @@ fpdf2>=2.7.0                 # Fallback для PDF
 
 # Logging
 structlog>=23.1.0
+
+# Auto-update
+packaging>=21.0               # Semantic versioning
+requests>=2.31.0              # HTTP для GitHub API (уже есть от aiogram, но явно)

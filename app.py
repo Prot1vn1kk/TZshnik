@@ -1,413 +1,342 @@
+"""
+TZshnik v2.0 - Auto-updater Entry Point
+
+Профессиональная система автообновления через GitHub Releases.
+Использует semantic versioning и ZIP архивы для простоты и надёжности.
+
+Inspired by: https://github.com/alleexxeeyy/playerok-universal
+"""
+
 import asyncio
+import logging
 import os
+import shutil
 import sys
 import zipfile
-import io
-import hashlib
-import json
+from io import BytesIO
 from pathlib import Path
-import logging
-import shutil
-from datetime import datetime
-from typing import Optional, Dict, Any
-import urllib.request
-import urllib.error
 
-# Настройка базового логирования для отладки запуска
+import requests
+from packaging.version import Version
+
+# ============================================================
+# КОНФИГУРАЦИЯ
+# ============================================================
+
+GITHUB_REPO = "Prot1vn1kk/TZshnik"
+VERSION_FILE = Path(__file__).parent / ".version"
+VERSION = "2.0.1"  # Starting version
+
+SKIP_UPDATE_FLAG = Path(__file__).parent / "TelegramBot_v2" / ".skip_update"
+
+# Директории
+PROJECT_ROOT = Path(__file__).resolve().parent
+BOT_DIR = PROJECT_ROOT / "TelegramBot_v2"
+
+
+# ============================================================
+# ЛОГИРОВАНИЕ
+# ============================================================
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger("DeployShim")
-
-# Определяем пути
-project_root = Path(__file__).resolve().parent
-bot_dir = project_root / "TelegramBot_v2"
-
-# GitHub конфигурация
-GITHUB_REPO = "Prot1vn1kk/TZshnik"
-GITHUB_API_BASE = "https://api.github.com"
-CURRENT_VERSION_FILE = project_root / ".version"
-
-# Файл для пропуска обновлений
-SKIP_UPDATE_FLAG = bot_dir / ".skip_update"
+logger = logging.getLogger("TZshnik.Updater")
 
 
 # ============================================================
-# ВЕРСИЯ ПРОЕКТА
+# GITHUB RELEASES API
 # ============================================================
 
-VERSION = "2.0.1"  # Текущая версия бота
+def get_releases() -> list:
+    """
+    Получить все релизы с GitHub.
 
+    Returns:
+        Список релизов в формате JSON
+    """
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
+
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        logger.warning(f"Ошибка запроса к GitHub API: {e}")
+        return []
+
+
+def get_latest_release(releases: list) -> dict | None:
+    """
+    Найти последний релиз по semantic versioning.
+
+    Args:
+        releases: Список релизов из GitHub API
+
+    Returns:
+        Последний релиз или None
+    """
+    latest = None
+    latest_ver = None
+
+    for rel in releases:
+        tag_name = rel.get("tag_name", "")
+        if not tag_name:
+            continue
+
+        # Пропускаем prerelease если есть более стабильные
+        if rel.get("prerelease", False):
+            continue
+
+        try:
+            ver = Version(tag_name)
+            if latest_ver is None or ver > latest_ver:
+                latest_ver = ver
+                latest = rel
+        except Exception:
+            # Пропускаем теги, которые не являются semver
+            continue
+
+    return latest
+
+
+def download_release_zip(release_info: dict) -> bytes | None:
+    """
+    Скачать ZIP архив релиза.
+
+    Args:
+        release_info: Информация о релизе из GitHub API
+
+    Returns:
+        Содержимое архива в байтах или None
+    """
+    zip_url = release_info.get('zipball_url')
+    if not zip_url:
+        logger.error("В релизе нет URL для скачивания архива")
+        return None
+
+    try:
+        logger.info(f"Скачивание архива с {zip_url[:50]}...")
+        response = requests.get(zip_url, timeout=120)
+        response.raise_for_status()
+        return response.content
+    except requests.RequestException as e:
+        logger.error(f"Ошибка скачивания архива: {e}")
+        return None
+
+
+def install_release(content: bytes) -> bool:
+    """
+    Распаковать и установить все файлы из архива обновления.
+
+    Args:
+        content: Содержимое ZIP архива в байтах
+
+    Returns:
+        True если успешно, False иначе
+    """
+    temp_dir = PROJECT_ROOT / ".temp_update"
+
+    try:
+        # Очищаем старую временную папку
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        # Распаковываем архив
+        logger.info("Распаковка архива...")
+        with zipfile.ZipFile(BytesIO(content), 'r') as zip_ref:
+            zip_ref.extractall(temp_dir)
+
+        # Находим корневую папку архива
+        archive_root = None
+        for item in temp_dir.iterdir():
+            if item.is_dir():
+                archive_root = item
+                break
+
+        if not archive_root:
+            logger.error("В архиве нет корневой папки!")
+            return False
+
+        logger.info(f"Корневая папка архива: {archive_root.name}")
+
+        # Копируем все файлы из архива
+        files_count = 0
+        for src_file in archive_root.rglob("*"):
+            if src_file.is_file():
+                # Вычисляем относительный путь от archive_root
+                rel_path = src_file.relative_to(archive_root)
+
+                # Если путь содержит "TelegramBot_v2", берём после него
+                # Это нужно потому что в архиве файлы лежат в {repo}-{hash}/TelegramBot_v2/
+                path_parts = rel_path.parts
+                try:
+                    tg_idx = path_parts.index("TelegramBot_v2")
+                    rel_path = Path(*path_parts[tg_idx + 1:])
+                except ValueError:
+                    # Если нет TelegramBot_v2 в пути, пропускаем файл
+                    # (это могут быть файлы уровня выше, которые не нужно обновлять)
+                    continue
+
+                dst_file = BOT_DIR / rel_path
+
+                # Создаём директорию если нужно
+                dst_file.parent.mkdir(parents=True, exist_ok=True)
+
+                # Копируем файл
+                shutil.copy2(src_file, dst_file)
+                files_count += 1
+
+        logger.info(f"Обновлено {files_count} файлов")
+        return True
+
+    except Exception as e:
+        logger.error(f"Ошибка установки обновления: {e}", exc_info=True)
+        return False
+
+    finally:
+        # Удаляем временную папку
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+# ============================================================
+# УПРАВЛЕНИЕ ВЕРСИЯМИ
+# ============================================================
 
 def get_current_version() -> str:
-    """Получает текущую версию бота."""
-    # Если есть файл версии, читаем из него
-    if CURRENT_VERSION_FILE.exists():
+    """
+    Получить текущую версию из файла.
+
+    Returns:
+        Текущая версия
+    """
+    if VERSION_FILE.exists():
         try:
-            with open(CURRENT_VERSION_FILE, 'r') as f:
-                return f.read().strip()
+            return VERSION_FILE.read_text().strip()
         except Exception:
             pass
     return VERSION
 
 
-def set_current_version(version: str) -> bool:
-    """Сохраняет текущую версию."""
+def set_current_version(version: str) -> None:
+    """
+    Сохранить версию в файл.
+
+    Args:
+        version: Версия для сохранения
+    """
     try:
-        with open(CURRENT_VERSION_FILE, 'w') as f:
-            f.write(version)
-        return True
+        VERSION_FILE.write_text(version)
     except Exception as e:
         logger.warning(f"Не удалось сохранить версию: {e}")
-        return False
-
-
-# ============================================================
-# GITHUB API ФУНКЦИИ
-# ============================================================
-
-def fetch_github_api(endpoint: str) -> Optional[Dict[str, Any]]:
-    """
-    Выполняет запрос к GitHub API.
-
-    Args:
-        endpoint: API endpoint (например, /repos/user/repo/releases/latest)
-
-    Returns:
-        JSON ответ или None
-    """
-    url = f"{GITHUB_API_BASE}{endpoint}"
-
-    try:
-        request = urllib.request.Request(url)
-        request.add_header('User-Agent', 'TZshnik-Bot')
-        request.add_header('Accept', 'application/vnd.github.v3+json')
-
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = response.read().decode('utf-8')
-            return json.loads(data)
-
-    except urllib.error.HTTPError as e:
-        logger.warning(f"GitHub API HTTP Error: {e.code}")
-        return None
-    except urllib.error.URLError as e:
-        logger.warning(f"GitHub API Connection Error: {e}")
-        return None
-    except Exception as e:
-        logger.warning(f"GitHub API Error: {e}")
-        return None
-
-
-def get_latest_commit() -> Optional[Dict[str, Any]]:
-    """
-    Получает информацию о последнем коммите в ветке main.
-
-    Returns:
-        Информация о коммите или None
-    """
-    return fetch_github_api(f"/repos/{GITHUB_REPO}/commits/main")
-
-
-def get_file_from_github(file_path: str, ref: str = "main") -> Optional[str]:
-    """
-    Получает содержимое файла из GitHub.
-
-    Args:
-        file_path: Путь к файлу в репозитории
-        ref: Ветка или коммит
-
-    Returns:
-        Содержимое файла или None
-    """
-    return fetch_github_api(f"/repos/{GITHUB_REPO}/contents/TelegramBot_v2/{file_path}?ref={ref}")
 
 
 # ============================================================
 # ПРОВЕРКА ФАЙЛОВОЙ СИСТЕМЫ
 # ============================================================
 
-def check_filesystem_writable(path: Optional[Path] = None) -> bool:
+def check_filesystem_writable(path: Path | None = None) -> bool:
     """
-    Проверяет, можно ли писать в файловую систему.
+    Проверить, можно ли писать в файловую систему.
 
     Args:
-        path: Путь для проверки (по умолчанию project_root)
+        path: Путь для проверки (по умолчанию BOT_DIR)
 
     Returns:
         True если можно писать
     """
-    test_path = path or project_root
+    test_path = path or BOT_DIR
 
     try:
-        # Пытаемся создать тестовый файл
         test_file = test_path / f".write_test_{os.getpid()}"
         test_file.write_text("test")
         test_file.unlink()
         return True
-    except (OSError, IOError, PermissionError) as e:
-        logger.warning(f"Файловая система только для чтения: {e}")
-        return False
-
-
-def get_writable_dir() -> Optional[Path]:
-    """
-    Находит директорию, доступную для записи.
-
-    Returns:
-        Путь к writable директории или None
-    """
-    # Проверяем домашнюю директорию
-    home = Path.home()
-    if check_filesystem_writable(home):
-        return home
-
-    # Проверяем /tmp
-    tmp = Path("/tmp")
-    if tmp.exists() and check_filesystem_writable(tmp):
-        return tmp
-
-    # Проверяем текущую директорию
-    cwd = Path.cwd()
-    if check_filesystem_writable(cwd):
-        return cwd
-
-    return None
-
-
-# ============================================================
-# ФУНКЦИИ ОБНОВЛЕНИЯ
-# ============================================================
-
-def check_updates() -> tuple[bool, Optional[str], Optional[str]]:
-    """
-    Проверяет наличие обновлений через GitHub API.
-
-    Returns:
-        Tuple[has_updates, latest_commit_sha, commit_message]
-    """
-    logger.info("🔍 Проверка обновлений через GitHub API...")
-
-    commit_info = get_latest_commit()
-    if not commit_info or 'sha' not in commit_info:
-        logger.warning("⚠️ Не удалось получить информацию о коммите")
-        return False, None, None
-
-    latest_sha = commit_info['sha'][:8]  # Короткий хеш
-    message = commit_info.get('commit', {}).get('message', 'Нет описания')
-    date_str = commit_info.get('commit', {}).get('committer', {}).get('date', '')
-
-    # Читаем сохранённую версию
-    saved_version = get_current_version()
-
-    has_updates = saved_version != latest_sha
-
-    if has_updates:
-        logger.info(f"📦 Доступно обновление: {latest_sha}")
-        if date_str:
-            logger.info(f"   Дата: {date_str}")
-        if message:
-            logger.info(f"   Изменения: {message[:100]}...")
-    else:
-        logger.info("✅ Бот актуален")
-
-    return has_updates, latest_sha, message
-
-
-def download_and_update_py_files() -> bool:
-    """
-    Загружает и обновляет только Python файлы (без данных и конфигов).
-
-    Returns:
-        True если обновление успешно
-    """
-    logger.info("⬇️ Загрузка обновлений Python файлов...")
-
-    # Список файлов для обновления (Python модули)
-    files_to_update = [
-        "bot/__init__.py",
-        "bot/main.py",
-        "bot/config/__init__.py",
-        "bot/config/settings.py",
-        "bot/handlers/__init__.py",
-        "bot/handlers/start.py",
-        "bot/handlers/admin_panel.py",
-        "bot/handlers/payments.py",
-        "bot/keyboards/__init__.py",
-        "bot/keyboards/admin_keyboards.py",
-        "bot/middleware.py",
-        "bot/states.py",
-        "bot/utils/__init__.py",
-        "bot/utils/package_menu.py",
-        "config/__init__.py",
-        "config/packages.py",
-        "config/constants.py",
-        "database/__init__.py",
-        "database/database.py",
-        "database/models.py",
-        "database/crud.py",
-        "database/admin_crud.py",
-        "templates/__init__.py",
-        "templates/message_templates.py",
-        "utils/__init__.py",
-        "utils/temp_files.py",
-        "utils/pdf_export.py",
-        "utils/validators.py",
-        "app.py",
-    ]
-
-    success_count = 0
-
-    for file_path in files_to_update:
-        try:
-            # Получаем файл из GitHub
-            file_info = get_file_from_github(file_path)
-            if not file_info or 'content' not in file_info:
-                logger.warning(f"⚠️ Файл {file_path} не найден на GitHub")
-                continue
-
-            # Декодируем содержимое (base64)
-            import base64
-            content = base64.b64decode(file_info['content']).decode('utf-8')
-
-            # Записываем файл
-            target_path = bot_dir / file_path
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_text(content, encoding='utf-8')
-
-            success_count += 1
-            logger.info(f"   ✅ {file_path}")
-
-        except Exception as e:
-            logger.warning(f"   ❌ {file_path}: {e}")
-
-    logger.info(f"✅ Обновлено {success_count}/{len(files_to_update)} файлов")
-    return success_count > 0
-
-
-def update_via_github_zipball() -> bool:
-    """
-    Альтернативный метод: скачивание ZIP архива с GitHub.
-    Работает на некоторых облачных хостингах.
-
-    Returns:
-        True если обновление успешно
-    """
-    logger.info("📦 Попытка обновления через ZIP архив...")
-
-    zipball_url = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/main.zip"
-
-    try:
-        # Скачиваем ZIP
-        request = urllib.request.Request(zipball_url)
-        request.add_header('User-Agent', 'TZshnik-Bot')
-
-        with urllib.request.urlopen(request, timeout=60) as response:
-            zip_data = response.read()
-
-        # Распаковываем в памяти
-        with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zip_ref:
-            # Получаем список файлов
-            file_list = zip_ref.namelist()
-
-            # Фильтруем только нужные файлы (Python модули)
-            py_files = [f for f in file_list if f.endswith('.py') and
-                       'TelegramBot_v2' in f and
-                       '__pycache__' not in f and
-                       '.pyc' not in f]
-
-            logger.info(f"📦 Найдено {len(py_files)} Python файлов")
-
-            for zip_path in py_files:
-                try:
-                    # Извлекаем файл
-                    file_data = zip_ref.read(zip_path)
-
-                    # Вычисляем целевой путь
-                    # ZIP путь: TZshnik-main/TelegramBot_v2/file.py
-                    relative_path = zip_path.split('TelegramBot_v2/', 1)[1]
-                    target_path = bot_dir / relative_path
-
-                    # Создаём директорию
-                    target_path.parent.mkdir(parents=True, exist_ok=True)
-
-                    # Записываем файл
-                    target_path.write_bytes(file_data)
-
-                except Exception as e:
-                    logger.warning(f"   ⚠️ {zip_path}: {e}")
-
-        logger.info("✅ Обновление через ZIP завершено")
-        return True
-
-    except Exception as e:
-        logger.error(f"❌ Ошибка ZIP обновления: {e}")
+    except (OSError, IOError, PermissionError):
+        logger.warning("Файловая система только для чтения")
         return False
 
 
 # ============================================================
-# ОСНОВНАЯ ФУНКЦИЯ АВТООБНОВЛЕНИЯ
+# ГЛАВНАЯ ФУНКЦИЯ АВТООБНОВЛЕНИЯ
 # ============================================================
 
 def auto_update() -> bool:
     """
-    Основная функция автообновления для облачного хостинга.
+    Главная функция автообновления.
 
     Returns:
-        True если обновление прошло успешно или не требуется
+        True если можно продолжать запуск бота
     """
     # Проверяем флаг пропуска обновления
     if SKIP_UPDATE_FLAG.exists():
         logger.info("⏭️ Обновление отключено (файл .skip_update)")
         return True
 
-    try:
-        # Проверяем возможность записи
-        if not check_filesystem_writable(bot_dir):
-            logger.warning("⚠️ Файловая система только для чтения")
-
-            # Проверяем наличие обновлений
-            has_updates, latest_sha, message = check_updates()
-
-            if has_updates:
-                logger.warning("=" * 60)
-                logger.warning("📦 ДОСТУПНО ОБНОВЛЕНИЕ!")
-                logger.warning(f"   Версия: {latest_sha}")
-                logger.warning("🔧 Обновление невозможно автоматически (read-only FS)")
-                logger.warning("📝 Пожалуйста, обратитесь в службу поддержки")
-                logger.warning("=" * 60)
-
-            return True
-
-        # Обычный режим обновления
-        has_updates, latest_sha, message = check_updates()
-
-        if not has_updates:
-            return True
-
-        # Метод 1: Обновление отдельных файлов через API
-        logger.info("🔄 Метод 1: Обновление через GitHub API...")
-
-        if download_and_update_py_files():
-            # Сохраняем новую версию
-            set_current_version(latest_sha)
-            logger.info("✅ Обновление завершено успешно!")
-            return True
-
-        # Метод 2: ZIP архив (fallback)
-        logger.info("🔄 Метод 2: Обновление через ZIP архив...")
-
-        if update_via_github_zipball():
-            set_current_version(latest_sha)
-            logger.info("✅ Обновление завершено!")
-            return True
-
-        logger.warning("⚠️ Все методы обновления не сработали")
+    # Проверяем возможность записи
+    if not check_filesystem_writable():
+        logger.warning("⚠️ Read-only файловая система, пропускаем обновление")
         return True
 
+    try:
+        logger.info("🔍 Проверка обновлений через GitHub Releases...")
+
+        # Получаем релизы
+        releases = get_releases()
+        if not releases:
+            logger.info("Нет доступных релизов")
+            return True
+
+        # Находим последний релиз
+        latest = get_latest_release(releases)
+        if not latest:
+            logger.info("Не найдено валидных релизов")
+            return True
+
+        latest_tag = latest.get("tag_name", "")
+        current = get_current_version()
+
+        logger.info(f"Текущая версия: {current}")
+        logger.info(f"Последняя версия: {latest_tag}")
+
+        # Сравниваем версии через semver
+        try:
+            current_ver = Version(current)
+            latest_ver = Version(latest_tag)
+        except Exception as e:
+            logger.warning(f"Некорректные версии: {e}")
+            return True
+
+        if current_ver >= latest_ver:
+            logger.info("✅ Установлена актуальная версия")
+            return True
+
+        # Доступно обновление
+        logger.info(f"📦 Доступно обновление: {latest_tag}")
+
+        # Скачиваем архив
+        content = download_release_zip(latest)
+        if not content:
+            logger.error("Не удалось скачать архив обновления")
+            return True  # Продолжаем работу бота
+
+        # Устанавливаем обновление
+        logger.info(f"📦 Установка обновления {latest_tag}...")
+        if install_release(content):
+            set_current_version(latest_tag)
+            logger.info(f"✅ Обновление до {latest_tag} успешно установлено!")
+            return True
+        else:
+            logger.error("❌ Не удалось установить обновление")
+            return True
+
     except Exception as e:
-        logger.error(f"❌ Ошибка автообновления: {e}")
-        return True  # Продолжаем работу бота
+        logger.error(f"Ошибка автообновления: {e}", exc_info=True)
+        return True  # Продолжаем работу бота при ошибках
 
 
 # ============================================================
@@ -415,27 +344,15 @@ def auto_update() -> bool:
 # ============================================================
 
 def prepare_environment():
-    """Подготовка окружения перед запуском."""
-    # Создаем папку data внутри TelegramBot_v2, если её нет
-    data_dir = bot_dir / "data"
-    exports_dir = bot_dir / "exports"
-    temp_files_dir = bot_dir / "data" / "temp_files"
+    """Подготовка окружения перед запуском бота."""
+    folders = [
+        BOT_DIR / "data",
+        BOT_DIR / "exports",
+        BOT_DIR / "data" / "temp_files",
+    ]
 
-    for folder in [data_dir, exports_dir, temp_files_dir]:
-        if not folder.exists():
-            try:
-                folder.mkdir(parents=True, exist_ok=True)
-                logger.info(f"✅ Создана директория: {folder}")
-            except Exception as e:
-                logger.error(f"❌ Не удалось создать директорию {folder}: {e}")
-                continue  # Продолжаем с другими папками
-
-        # Проверяем права на запись
-        if folder.exists():
-            if os.access(folder, os.W_OK):
-                logger.info(f"✅ Доступ на запись в {folder} подтвержден")
-            else:
-                logger.warning(f"⚠️ Нет прав на запись в {folder}")
+    for folder in folders:
+        folder.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
@@ -443,22 +360,30 @@ def prepare_environment():
 # ============================================================
 
 def fix_import_paths():
-    """Исправляет пути импорта для разных окружений."""
-    # Добавляем все необходимые пути в sys.path
+    """Добавляет все необходимые пути в sys.path."""
     paths_to_add = [
-        str(project_root),
-        str(bot_dir),
-        str(bot_dir / "bot"),
-        str(bot_dir / "config"),
-        str(bot_dir / "database"),
-        str(bot_dir / "utils"),
-        str(bot_dir / "templates"),
+        str(PROJECT_ROOT),
+        str(BOT_DIR),
+        str(BOT_DIR / "bot"),
+        str(BOT_DIR / "config"),
+        str(BOT_DIR / "database"),
+        str(BOT_DIR / "utils"),
+        str(BOT_DIR / "templates"),
     ]
 
     for path in paths_to_add:
         if path not in sys.path and Path(path).exists():
             sys.path.insert(0, path)
-            logger.debug(f"Добавлен путь: {path}")
+
+
+# ============================================================
+# ПЕРЕЗАПУСК БОТА
+# ============================================================
+
+def restart_bot():
+    """Перезапустить бота после обновления."""
+    logger.info("🔄 Перезапуск бота...")
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 # ============================================================
@@ -484,29 +409,16 @@ if __name__ == "__main__":
 
     # Импортируем и запускаем бота
     try:
-        # Пробуем разные варианты импорта
-        try:
-            from bot.main import main
-        except ImportError:
-            # Fallback для облачного хостинга
-            import importlib.util
-            spec = importlib.util.spec_from_file_location(
-                "main",
-                bot_dir / "bot" / "main.py"
-            )
-            main_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(main_module)
-            main = main_module.main
-
+        from bot.main import main
         logger.info("🤖 Запуск бота...")
         asyncio.run(main())
 
     except ImportError as e:
         logger.error(f"❌ Ошибка импорта: {e}")
         logger.error(f"   sys.path: {sys.path}")
-        logger.error(f"   bot_dir существует: {bot_dir.exists()}")
-        if bot_dir.exists():
-            logger.error(f"   bot/main.py существует: {(bot_dir / 'bot' / 'main.py').exists()}")
+        logger.error(f"   BOT_DIR существует: {BOT_DIR.exists()}")
+        if BOT_DIR.exists():
+            logger.error(f"   bot/main.py существует: {(BOT_DIR / 'bot' / 'main.py').exists()}")
         sys.exit(1)
 
     except KeyboardInterrupt:
