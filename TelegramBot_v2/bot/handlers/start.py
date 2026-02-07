@@ -9,11 +9,18 @@
 
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 import structlog
 
-from database import get_user_stats, get_user_generations, get_generation_by_id
+from database import (
+    get_user_stats,
+    get_user_generations,
+    get_generation_by_id,
+    create_idea,
+    is_unlimited_active,
+)
 from database.models import User
 from bot.keyboards import (
     get_main_menu_keyboard,
@@ -23,11 +30,16 @@ from bot.keyboards import (
     get_tz_detail_keyboard,
     get_back_keyboard,
 )
-from bot.states import GenerationStates
+from bot.states import GenerationStates, IdeaStates
 
 
 logger = structlog.get_logger()
 router = Router(name="start")
+
+
+def get_balance_display(user: User) -> str:
+    """Отображение баланса с учётом безлимита."""
+    return "∞" if is_unlimited_active(user) else str(user.balance)
 
 
 # ============================================================
@@ -96,8 +108,6 @@ BALANCE_MESSAGE = """
 {status_text}
 
 ━━━━━━━━━━━━━━━━━━━━━
-
-💳 <b>Пополнить баланс:</b>
 """
 
 MENU_MESSAGE = """
@@ -842,7 +852,7 @@ async def cmd_start(
     
     # Отправляем стартовое сообщение с inline клавиатурой
     await message.answer(
-        START_MESSAGE.format(balance=user.balance),
+        START_MESSAGE.format(balance=get_balance_display(user)),
     )
     
     # Отправляем дополнительное сообщение с inline кнопками для быстрого старта
@@ -854,7 +864,7 @@ async def cmd_start(
     logger.info(
         "User started bot",
         telegram_id=message.from_user.id,
-        balance=user.balance,
+        balance=get_balance_display(user),
     )
 
 
@@ -878,7 +888,7 @@ async def cmd_create(
     state: FSMContext,
 ) -> None:
     """Команда /create - начать создание ТЗ."""
-    if user.balance <= 0:
+    if user.balance <= 0 and not is_unlimited_active(user):
         await message.answer(
             "❌ <b>У тебя закончились кредиты!</b>\n\n"
             "Нажми «💰 Баланс» или /buy для пополнения.",
@@ -905,7 +915,9 @@ async def cmd_balance(message: Message, user: User) -> None:
     telegram_id = message.from_user.id if message.from_user else 0
     stats = await get_user_stats(telegram_id)
     
-    if user.balance > 5:
+    if is_unlimited_active(user):
+        status_text = "👑 Безлимит активен"
+    elif user.balance > 5:
         status_text = "✅ Достаточно кредитов для работы"
     elif user.balance > 0:
         status_text = "⚠️ Кредиты заканчиваются, пополните баланс"
@@ -913,7 +925,7 @@ async def cmd_balance(message: Message, user: User) -> None:
         status_text = "❌ Кредиты закончились! Пополните баланс"
     
     text = BALANCE_MESSAGE.format(
-        balance=user.balance,
+        balance=get_balance_display(user),
         total_generations=stats.get("total_generations", 0),
         successful=stats.get("successful_generations", 0),
         status_text=status_text,
@@ -925,15 +937,15 @@ async def cmd_balance(message: Message, user: User) -> None:
 @router.message(Command("buy"))
 async def cmd_buy(message: Message, user: User) -> None:
     """Команда /buy - купить кредиты."""
-    from bot.handlers.payments import show_packages
-    
+    from bot.handlers.payments import callback_show_packages
+
     # Имитируем callback для показа пакетов
     class FakeCallback:
         from_user = message.from_user
         message = message
         async def answer(self, *args, **kwargs): pass
-    
-    await show_packages(FakeCallback(), user)
+
+    await callback_show_packages(FakeCallback(), user)
 
 
 @router.message(Command("history"))
@@ -987,7 +999,7 @@ async def btn_create_tz(
     Проверяет баланс и переводит в режим ожидания фото.
     """
     # Проверяем баланс
-    if user.balance <= 0:
+    if user.balance <= 0 and not is_unlimited_active(user):
         await message.answer(
             "❌ <b>У тебя закончились кредиты!</b>\n\n"
             "Нажми «💰 Баланс» для пополнения.",
@@ -1023,7 +1035,9 @@ async def btn_balance(
     stats = await get_user_stats(telegram_id)
     
     # Формируем текст статуса
-    if user.balance > 5:
+    if is_unlimited_active(user):
+        status_text = "👑 Безлимит активен"
+    elif user.balance > 5:
         status_text = "✅ Достаточно кредитов для работы"
     elif user.balance > 0:
         status_text = "⚠️ Кредиты заканчиваются"
@@ -1035,7 +1049,7 @@ async def btn_balance(
     
     await message.answer(
         BALANCE_MESSAGE.format(
-            balance=user.balance,
+            balance=get_balance_display(user),
             total_generations=total,
             successful=total,
             status_text=status_text,
@@ -1133,7 +1147,7 @@ async def callback_start_generation(
     await callback.answer()
     
     # Проверяем баланс
-    if user.balance <= 0:
+    if user.balance <= 0 and not is_unlimited_active(user):
         await callback.message.edit_text(
             "❌ <b>У тебя закончились кредиты!</b>\n\n"
             "Нажми «💰 Баланс» для пополнения.",
@@ -1190,22 +1204,6 @@ async def callback_show_example_category(callback: CallbackQuery) -> None:
     )
 
 
-@router.callback_query(F.data == "show_packages")
-async def callback_show_packages(callback: CallbackQuery) -> None:
-    """Callback для кнопки 'Тарифы'."""
-    from bot.keyboards import get_packages_keyboard
-    
-    await callback.answer()
-    
-    await callback.message.edit_text(
-        "💳 <b>Выбери пакет кредитов:</b>\n\n"
-        "🔹 <b>Старт</b> — 5 ТЗ за 149₽ (30₽/шт)\n"
-        "⭐ <b>Оптимальный</b> — 20 ТЗ за 399₽ (20₽/шт)\n"
-        "🚀 <b>Профи</b> — 50 ТЗ за 699₽ (14₽/шт)\n\n"
-        "Выбери подходящий пакет:",
-        reply_markup=get_packages_keyboard(),
-    )
-
 
 @router.callback_query(F.data == "show_main_menu")
 async def callback_show_main_menu(callback: CallbackQuery, user: User) -> None:
@@ -1231,7 +1229,10 @@ async def callback_show_balance(callback: CallbackQuery, user: User) -> None:
     stats = await get_user_stats(telegram_id)
     
     # Определяем эмодзи и статус баланса
-    if user.balance >= 10:
+    if is_unlimited_active(user):
+        balance_emoji = "👑"
+        status_text = "Безлимит активен"
+    elif user.balance >= 10:
         balance_emoji = "🟢"
         status_text = "✅ Достаточно кредитов для работы"
     elif user.balance > 0:
@@ -1248,13 +1249,12 @@ async def callback_show_balance(callback: CallbackQuery, user: User) -> None:
     text = (
         f"💰 <b>Ваш баланс</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"{balance_emoji} <b>{user.balance} кредитов</b>\n\n"
+        f"{balance_emoji} <b>{get_balance_display(user)} кредитов</b>\n\n"
         f"📊 <b>Статистика:</b>\n"
         f"   • Сгенерировано ТЗ: {total}\n"
         f"   • Дата регистрации: {user.created_at.strftime('%d.%m.%Y')}\n\n"
         f"{status_text}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💳 <b>Пополнить баланс:</b>\n"
     )
     
     # Показываем выгодные тарифы
@@ -1268,9 +1268,8 @@ async def callback_show_balance(callback: CallbackQuery, user: User) -> None:
     # Создаём клавиатуру
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 Пополнить баланс", callback_data="show_packages")
-    builder.button(text="📋 История покупок", callback_data="payment_history")
     builder.button(text="📖 В главное меню", callback_data="show_main_menu")
-    builder.adjust(2, 1)
+    builder.adjust(1)
     
     if callback.message:
         await callback.message.edit_text(
@@ -1378,6 +1377,11 @@ async def callback_suggest_idea(callback: CallbackQuery) -> None:
     # Получаем username админа из конфига
     admin_contact = f"@{settings.admin_username}" if hasattr(settings, 'admin_username') and settings.admin_username else "администратору"
     
+    # Создаем клавиатуру с inline кнопкой
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="📝 Отправить идею", callback_data="send_idea"))
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="show_history"))
+    
     await callback.message.edit_text(
         "💡 <b>Предложить идею</b>\n\n"
         "Есть классная идея или предложение по улучшению бота?\n"
@@ -1390,7 +1394,140 @@ async def callback_suggest_idea(callback: CallbackQuery) -> None:
         "• Улучшение формата ТЗ\n"
         "• Новая полезная функция\n"
         "• Исправление ошибок",
-        reply_markup=get_back_keyboard("show_history"),
+        reply_markup=builder.as_markup(),
+    )
+
+
+@router.callback_query(F.data == "send_idea")
+async def callback_send_idea(callback: CallbackQuery, state: FSMContext) -> None:
+    """Начало процесса отправки идеи."""
+    await callback.answer()
+    
+    # Создаем клавиатуру с кнопкой отмены
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_idea"))
+    
+    await callback.message.edit_text(
+        "📝 <b>Отправить идею</b>\n\n"
+        "Опиши свою идею или предложение по улучшению бота.\n\n"
+        "<i>Минимум 10 символов, максимум 1000.</i>\n\n"
+        "Напиши своё сообщение:",
+        reply_markup=builder.as_markup(),
+    )
+    
+    # Устанавливаем состояние ожидания текста идеи
+    await state.set_state(IdeaStates.waiting_idea_text)
+
+
+@router.message(IdeaStates.waiting_idea_text, F.text)
+async def handle_idea_text(message: Message, state: FSMContext, user: User) -> None:
+    """Обработка текста идеи от пользователя."""
+    from bot.config import settings
+    
+    idea_text = message.text.strip()
+    
+    # Валидация длины
+    if len(idea_text) < 10:
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_idea"))
+        
+        await message.answer(
+            "❌ Слишком короткое сообщение.\n\n"
+            "Пожалуйста, опиши идею подробнее (минимум 10 символов).",
+            reply_markup=builder.as_markup(),
+        )
+        return
+    
+    if len(idea_text) > 1000:
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_idea"))
+        
+        await message.answer(
+            "❌ Слишком длинное сообщение.\n\n"
+            "Пожалуйста, сократи текст (максимум 1000 символов).",
+            reply_markup=builder.as_markup(),
+        )
+        return
+    
+    # Получаем информацию о пользователе
+    user_stats = await get_user_stats(user.telegram_id)
+    
+    # Сохраняем идею в БД
+    idea_record = None
+    try:
+        idea_record = await create_idea(user.id, idea_text)
+    except Exception as e:
+        logger.error("idea_save_failed", error=str(e), telegram_id=user.telegram_id)
+    
+    # Формируем сообщение для админов
+    admin_message = (
+        f"💡 <b>Новая идея от пользователя</b>\n\n"
+        f"👤 <b>От:</b> {message.from_user.full_name}"
+    )
+    
+    if message.from_user.username:
+        admin_message += f" (@{message.from_user.username})"
+    
+    admin_message += (
+        f"\n🆔 <b>ID:</b> <code>{user.telegram_id}</code>\n"
+        f"💰 <b>Баланс:</b> {user.balance} генераций\n"
+        f"📊 <b>Создано ТЗ:</b> {user_stats['total_generations']}\n"
+        f"🧾 <b>ID идеи:</b> <code>{idea_record.id if idea_record else '—'}</code>\n\n"
+        f"💬 <b>Текст идеи:</b>\n{idea_text}"
+    )
+    
+    # Отправляем сообщение всем админам из настроек
+    if settings.admin_ids:
+        for admin_id in settings.admin_ids:
+            try:
+                await message.bot.send_message(
+                    chat_id=admin_id,
+                    text=admin_message,
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to send idea to admin",
+                    admin_id=admin_id,
+                    error=str(e),
+                )
+    else:
+        logger.warning("No admin IDs configured for idea notifications")
+    
+    # Отправляем подтверждение пользователю
+    from bot.keyboards import get_main_menu_keyboard
+    
+    await message.answer(
+        "✅ <b>Спасибо за идею!</b>\n\n"
+        "Твоё предложение отправлено модераторам.\n"
+        "Мы обязательно рассмотрим его!\n\n"
+        "🎁 За оригинальные идеи награждаем <b>+2 лимита</b>.",
+        reply_markup=get_main_menu_keyboard(),
+    )
+    
+    # Очищаем состояние
+    await state.clear()
+    
+    logger.info(
+        "User submitted idea",
+        user_id=user.telegram_id,
+        username=message.from_user.username if message.from_user else None,
+        idea_length=len(idea_text),
+    )
+
+
+@router.callback_query(F.data == "cancel_idea")
+async def callback_cancel_idea(callback: CallbackQuery, state: FSMContext, user: User) -> None:
+    """Отмена отправки идеи."""
+    from bot.keyboards import get_main_menu_keyboard
+    
+    await callback.answer()
+    await state.clear()
+    
+    await callback.message.edit_text(
+        "❌ Отправка идеи отменена.\n\n"
+        "Ты можешь вернуться к этому позже!",
+        reply_markup=get_main_menu_keyboard(),
     )
 
 
@@ -1400,7 +1537,6 @@ async def callback_cancel(callback: CallbackQuery, user: User) -> None:
     from bot.keyboards import get_main_menu_keyboard
     
     await callback.answer()
-    
     await callback.message.edit_text(
         MENU_MESSAGE,
         reply_markup=get_main_menu_keyboard(),
