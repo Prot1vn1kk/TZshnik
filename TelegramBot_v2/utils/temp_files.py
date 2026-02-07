@@ -42,6 +42,7 @@ class TempPhoto:
     size_bytes: int  # Размер файла в байтах
     extension: str  # Расширение файла (.jpeg, .png)
     created_at: datetime  # Время создания
+    order: int = 0  # Порядковый номер загрузки (стабильный)
     
     @property
     def display_name(self) -> str:
@@ -62,6 +63,7 @@ class TempPhoto:
             "size_bytes": self.size_bytes,
             "extension": self.extension,
             "created_at": self.created_at.isoformat(),
+            "order": self.order,
         }
     
     @classmethod
@@ -74,6 +76,7 @@ class TempPhoto:
             size_bytes=data["size_bytes"],
             extension=data["extension"],
             created_at=datetime.fromisoformat(data["created_at"]),
+            order=data.get("order", 0),
         )
 
 

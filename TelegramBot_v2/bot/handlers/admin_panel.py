@@ -26,6 +26,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from bot.config import settings
 from bot.keyboards.admin_keyboards import (
     CATEGORY_NAMES,
+    IDEA_STATUS_NAMES,
     get_admin_actions_keyboard,
     get_admin_back_keyboard,
     get_admin_main_keyboard,
@@ -38,12 +39,15 @@ from bot.keyboards.admin_keyboards import (
     get_free_credits_keyboard,
     get_generation_card_keyboard,
     get_generations_list_keyboard,
+    get_idea_card_keyboard,
+    get_ideas_list_keyboard,
     get_logs_keyboard,
     get_payment_card_keyboard,
     get_payments_list_keyboard,
     get_settings_keyboard,
     get_user_card_keyboard,
     get_users_list_keyboard,
+    get_unlimited_manage_keyboard,
 )
 from bot.states import AdminStates
 from database.admin_crud import (
@@ -51,12 +55,18 @@ from database.admin_crud import (
     admin_block_user,
     admin_delete_generation,
     admin_remove_credits,
+    admin_approve_idea,
+    admin_reject_idea,
     admin_unblock_user,
+    admin_grant_unlimited,
+    admin_revoke_unlimited,
     get_admin_actions,
     get_bot_setting,
     get_category_stats,
     get_conversion_stats,
     get_dashboard_stats,
+    get_idea_full_info,
+    get_ideas_paginated,
     get_generation_full_info,
     get_generations_paginated,
     get_payments_paginated,
@@ -104,6 +114,52 @@ class AdminCallbackFilter:
         return is_admin(callback.from_user.id)
 
 
+def _build_dashboard_text(stats: Dict[str, Any]) -> str:
+    """Построить текст дашборда из статистики."""
+    top_cats = stats.get("top_categories", [])
+    if top_cats:
+        total_gens = sum(c["count"] for c in top_cats)
+        if total_gens > 0:
+            cats_text = "\n".join([
+                f"   • {CATEGORY_NAMES.get(c['category'], c['category'])}: "
+                f"{c['count']} ({c['count']/total_gens*100:.0f}%)"
+                for c in top_cats[:5]
+            ])
+        else:
+            cats_text = "\n".join([
+                f"   • {CATEGORY_NAMES.get(c['category'], c['category'])}: 0"
+                for c in top_cats[:5]
+            ])
+    else:
+        cats_text = "   • Нет данных"
+
+    return (
+        "🔐 <b>АДМИН-ПАНЕЛЬ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        f"👥 <b>Пользователи:</b>\n"
+        f"   • Всего: <b>{stats['total_users']}</b>\n"
+        f"   • Активных (7 дн): <b>{stats['active_users_week']}</b>\n"
+        f"   • Новых сегодня: <b>{stats['new_users_today']}</b>\n\n"
+
+        f"💰 <b>Доход:</b>\n"
+        f"   • Сегодня: <b>{stats['revenue_today']:.0f}₽</b>\n"
+        f"   • За неделю: <b>{stats['revenue_week']:.0f}₽</b>\n"
+        f"   • За месяц: <b>{stats['revenue_month']:.0f}₽</b>\n"
+        f"   • Всего: <b>{stats['revenue_total']:.0f}₽</b>\n\n"
+
+        f"📝 <b>Генерации:</b>\n"
+        f"   • Всего: <b>{stats['total_generations']}</b>\n"
+        f"   • Сегодня: <b>{stats['generations_today']}</b>\n"
+        f"   • Среднее качество: <b>{stats['avg_quality_score']}%</b>\n\n"
+
+        f"🔥 <b>Топ категорий:</b>\n{cats_text}\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+    )
+
+
 # ============================================================
 # КОМАНДА /ADMIN - ДАШБОРД
 # ============================================================
@@ -125,54 +181,18 @@ async def cmd_admin(message: Message, state: FSMContext) -> None:
     try:
         stats = await get_dashboard_stats()
         
-        # Форматируем топ категорий
-        top_cats = stats.get("top_categories", [])
-        if top_cats:
-            total_gens = sum(c["count"] for c in top_cats)
-            cats_text = "\n".join([
-                f"   • {CATEGORY_NAMES.get(c['category'], c['category'])}: "
-                f"{c['count']} ({c['count']/total_gens*100:.0f}%)" 
-                for c in top_cats[:5]
-            ])
-        else:
-            cats_text = "   • Нет данных"
-        
-        text = (
-            "🔐 <b>АДМИН-ПАНЕЛЬ</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            
-            f"👥 <b>Пользователи:</b>\n"
-            f"   • Всего: <b>{stats['total_users']}</b>\n"
-            f"   • Активных (7 дн): <b>{stats['active_users_week']}</b>\n"
-            f"   • Новых сегодня: <b>{stats['new_users_today']}</b>\n\n"
-            
-            f"💰 <b>Доход:</b>\n"
-            f"   • Сегодня: <b>{stats['revenue_today']:.0f}₽</b>\n"
-            f"   • За неделю: <b>{stats['revenue_week']:.0f}₽</b>\n"
-            f"   • За месяц: <b>{stats['revenue_month']:.0f}₽</b>\n"
-            f"   • Всего: <b>{stats['revenue_total']:.0f}₽</b>\n\n"
-            
-            f"📝 <b>Генерации:</b>\n"
-            f"   • Всего: <b>{stats['total_generations']}</b>\n"
-            f"   • Сегодня: <b>{stats['generations_today']}</b>\n"
-            f"   • Среднее качество: <b>{stats['avg_quality_score']}%</b>\n\n"
-            
-            f"🔥 <b>Топ категорий:</b>\n{cats_text}\n\n"
-            
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        )
-        
+        text = _build_dashboard_text(stats)
+
         await message.answer(
             text,
             reply_markup=get_admin_main_keyboard(),
         )
-        
+
         logger.info(
             "admin_panel_opened",
             admin_id=message.from_user.id,
         )
-        
+
     except Exception as e:
         logger.error("admin_panel_error", error=str(e))
         await message.answer(
@@ -191,58 +211,22 @@ async def callback_admin_main(callback: CallbackQuery, state: FSMContext) -> Non
     if not callback.from_user or not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
-    
+
     await state.clear()
-    
+
     try:
         stats = await get_dashboard_stats()
-        
-        top_cats = stats.get("top_categories", [])
-        if top_cats:
-            total_gens = sum(c["count"] for c in top_cats)
-            cats_text = "\n".join([
-                f"   • {CATEGORY_NAMES.get(c['category'], c['category'])}: "
-                f"{c['count']} ({c['count']/total_gens*100:.0f}%)" 
-                for c in top_cats[:5]
-            ])
-        else:
-            cats_text = "   • Нет данных"
-        
-        text = (
-            "🔐 <b>АДМИН-ПАНЕЛЬ</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            
-            f"👥 <b>Пользователи:</b>\n"
-            f"   • Всего: <b>{stats['total_users']}</b>\n"
-            f"   • Активных (7 дн): <b>{stats['active_users_week']}</b>\n"
-            f"   • Новых сегодня: <b>{stats['new_users_today']}</b>\n\n"
-            
-            f"💰 <b>Доход:</b>\n"
-            f"   • Сегодня: <b>{stats['revenue_today']:.0f}₽</b>\n"
-            f"   • За неделю: <b>{stats['revenue_week']:.0f}₽</b>\n"
-            f"   • За месяц: <b>{stats['revenue_month']:.0f}₽</b>\n"
-            f"   • Всего: <b>{stats['revenue_total']:.0f}₽</b>\n\n"
-            
-            f"📝 <b>Генерации:</b>\n"
-            f"   • Всего: <b>{stats['total_generations']}</b>\n"
-            f"   • Сегодня: <b>{stats['generations_today']}</b>\n"
-            f"   • Среднее качество: <b>{stats['avg_quality_score']}%</b>\n\n"
-            
-            f"🔥 <b>Топ категорий:</b>\n{cats_text}\n\n"
-            
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        )
-        
+        text = _build_dashboard_text(stats)
+
         await callback.message.edit_text(
             text,
             reply_markup=get_admin_main_keyboard(),
         )
-        
+
     except Exception as e:
         logger.error("admin_main_error", error=str(e))
         await callback.answer("❌ Ошибка", show_alert=True)
-    
+
     await callback.answer()
 
 
@@ -415,46 +399,71 @@ async def handle_user_search(message: Message, state: FSMContext) -> None:
         await message.answer("❌ Ошибка поиска")
 
 
-async def show_user_card(message: Message, info: Dict[str, Any]) -> None:
-    """Показать карточку пользователя."""
+def build_user_card_text(info: Dict[str, Any]) -> str:
+    """Сформировать текст карточки пользователя."""
     username = info.get("username") or "Без имени"
     first_name = info.get("first_name") or ""
-    
+
     created_at = info.get("created_at")
-    if created_at:
-        created_str = created_at.strftime("%d.%m.%Y %H:%M")
-    else:
-        created_str = "Неизвестно"
-    
+    created_str = created_at.strftime("%d.%m.%Y %H:%M") if created_at else "Неизвестно"
+
     last_gen = info.get("last_generation")
-    if last_gen:
-        last_gen_str = last_gen.strftime("%d.%m.%Y %H:%M")
+    last_gen_str = last_gen.strftime("%d.%m.%Y %H:%M") if last_gen else "Нет"
+
+    unlimited_until = info.get("unlimited_until")
+    if info.get("is_unlimited") and unlimited_until:
+        unlimited_str = f"Активен до {unlimited_until.strftime('%d.%m.%Y %H:%M')}"
+    elif info.get("is_unlimited"):
+        unlimited_str = "Активен"
     else:
-        last_gen_str = "Нет"
-    
-    text = (
+        unlimited_str = "Нет"
+
+    return (
         f"👤 <b>ПОЛЬЗОВАТЕЛЬ</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        
+
         f"📛 <b>Имя:</b> {first_name}\n"
         f"👤 <b>Username:</b> @{username}\n"
         f"🆔 <b>Telegram ID:</b> <code>{info['telegram_id']}</code>\n\n"
-        
+
         f"💰 <b>Баланс:</b> {info['balance']} кредитов\n"
         f"📝 <b>Всего ТЗ:</b> {info['total_generated']}\n"
         f"💳 <b>Платежей:</b> {info['payments_count']}\n"
         f"💵 <b>Всего оплачено:</b> {info['total_paid']:.0f}₽\n\n"
-        
+
         f"📅 <b>Регистрация:</b> {created_str}\n"
         f"🕐 <b>Последняя генерация:</b> {last_gen_str}\n"
-        f"⭐ <b>Премиум:</b> {'Да' if info.get('is_premium') else 'Нет'}"
+        f"⭐ <b>Премиум:</b> {'Да' if info.get('is_premium') else 'Нет'}\n"
+        f"♾ <b>Безлимит:</b> {unlimited_str}"
     )
-    
+
+
+async def show_user_card(message: Message, info: Dict[str, Any]) -> None:
+    """Показать карточку пользователя."""
     await message.answer(
-        text,
+        build_user_card_text(info),
         reply_markup=get_user_card_keyboard(
             telegram_id=info["telegram_id"],
             is_blocked=False,  # TODO: добавить проверку блокировки
+        ),
+    )
+
+
+async def render_user_card_for_callback(
+    callback: CallbackQuery,
+    telegram_id: int,
+) -> None:
+    """Обновить карточку пользователя в callback сообщении."""
+    info = await get_user_full_info(telegram_id)
+    if not info:
+        await callback.answer("❌ Пользователь не найден", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        build_user_card_text(info),
+        reply_markup=get_user_card_keyboard(
+            telegram_id=telegram_id,
+            is_blocked=False,
         ),
     )
 
@@ -475,40 +484,7 @@ async def callback_user_card(callback: CallbackQuery, state: FSMContext) -> None
             await callback.answer("❌ Пользователь не найден", show_alert=True)
             return
         
-        username = info.get("username") or "Без имени"
-        first_name = info.get("first_name") or ""
-        
-        created_at = info.get("created_at")
-        created_str = created_at.strftime("%d.%m.%Y %H:%M") if created_at else "Неизвестно"
-        
-        last_gen = info.get("last_generation")
-        last_gen_str = last_gen.strftime("%d.%m.%Y %H:%M") if last_gen else "Нет"
-        
-        text = (
-            f"👤 <b>ПОЛЬЗОВАТЕЛЬ</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-            
-            f"📛 <b>Имя:</b> {first_name}\n"
-            f"👤 <b>Username:</b> @{username}\n"
-            f"🆔 <b>Telegram ID:</b> <code>{info['telegram_id']}</code>\n\n"
-            
-            f"💰 <b>Баланс:</b> {info['balance']} кредитов\n"
-            f"📝 <b>Всего ТЗ:</b> {info['total_generated']}\n"
-            f"💳 <b>Платежей:</b> {info['payments_count']}\n"
-            f"💵 <b>Всего оплачено:</b> {info['total_paid']:.0f}₽\n\n"
-            
-            f"📅 <b>Регистрация:</b> {created_str}\n"
-            f"🕐 <b>Последняя генерация:</b> {last_gen_str}\n"
-            f"⭐ <b>Премиум:</b> {'Да' if info.get('is_premium') else 'Нет'}"
-        )
-        
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_user_card_keyboard(
-                telegram_id=telegram_id,
-                is_blocked=False,
-            ),
-        )
+        await render_user_card_for_callback(callback, telegram_id)
         
     except Exception as e:
         logger.error("user_card_error", error=str(e))
@@ -586,10 +562,7 @@ async def callback_credit_add_confirm(callback: CallbackQuery, state: FSMContext
         
         if success:
             await callback.answer(f"✅ Начислено {amount} кредитов", show_alert=True)
-            
-            # Возвращаемся к карточке пользователя
-            callback.data = f"admin:user:{telegram_id}"
-            await callback_user_card(callback, state)
+            await render_user_card_for_callback(callback, telegram_id)
         else:
             await callback.answer("❌ Ошибка начисления", show_alert=True)
             
@@ -619,9 +592,7 @@ async def callback_credit_remove_confirm(callback: CallbackQuery, state: FSMCont
         
         if success:
             await callback.answer(f"✅ Списано {amount} кредитов", show_alert=True)
-            
-            callback.data = f"admin:user:{telegram_id}"
-            await callback_user_card(callback, state)
+            await render_user_card_for_callback(callback, telegram_id)
         else:
             await callback.answer("❌ Недостаточно кредитов", show_alert=True)
             
@@ -676,9 +647,8 @@ async def callback_block_confirm(callback: CallbackQuery, state: FSMContext) -> 
             await callback.answer("✅ Пользователь заблокирован", show_alert=True)
         else:
             await callback.answer("❌ Ошибка блокировки", show_alert=True)
-        
-        callback.data = f"admin:user:{telegram_id}"
-        await callback_user_card(callback, state)
+
+        await render_user_card_for_callback(callback, telegram_id)
         
     except Exception as e:
         logger.error("block_user_error", error=str(e))
@@ -704,13 +674,332 @@ async def callback_unblock_user(callback: CallbackQuery, state: FSMContext) -> N
             await callback.answer("✅ Пользователь разблокирован", show_alert=True)
         else:
             await callback.answer("❌ Ошибка", show_alert=True)
-        
-        callback.data = f"admin:user:{telegram_id}"
-        await callback_user_card(callback, state)
+
+        await render_user_card_for_callback(callback, telegram_id)
         
     except Exception as e:
         logger.error("unblock_user_error", error=str(e))
         await callback.answer("❌ Ошибка", show_alert=True)
+
+
+# ============================================================
+# БЕЗЛИМИТ
+# ============================================================
+
+@router.callback_query(F.data.startswith("admin:unlimited:"))
+async def callback_unlimited_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    """Открыть меню управления безлимитом."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    telegram_id = int(callback.data.split(":")[-1])
+
+    try:
+        info = await get_user_full_info(telegram_id)
+        if not info:
+            await callback.answer("❌ Пользователь не найден", show_alert=True)
+            return
+
+        is_active = bool(info.get("is_unlimited"))
+        unlimited_until = info.get("unlimited_until")
+        if is_active and unlimited_until:
+            status_text = f"Активен до {unlimited_until.strftime('%d.%m.%Y %H:%M')}"
+        elif is_active:
+            status_text = "Активен"
+        else:
+            status_text = "Не активен"
+
+        text = (
+            "♾ <b>БЕЗЛИМИТ</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Пользователь: <code>{telegram_id}</code>\n"
+            f"Статус: <b>{status_text}</b>\n\n"
+            "Выберите срок для выдачи/продления или заберите безлимит."
+        )
+
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_unlimited_manage_keyboard(
+                telegram_id=telegram_id,
+                is_active=is_active,
+            ),
+        )
+
+    except Exception as e:
+        logger.error("unlimited_menu_error", error=str(e))
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:unlimited_grant:"))
+async def callback_unlimited_grant(callback: CallbackQuery, state: FSMContext) -> None:
+    """Выдать/продлить безлимит."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    telegram_id = int(parts[-2])
+    duration_days = int(parts[-1])
+
+    try:
+        new_until = await admin_grant_unlimited(
+            admin_id=callback.from_user.id,
+            telegram_id=telegram_id,
+            duration_days=duration_days,
+            reason="Управление безлимитом через админ-панель",
+        )
+
+        if new_until:
+            until_str = new_until.strftime("%d.%m.%Y %H:%M")
+            await callback.answer(
+                f"✅ Безлимит до {until_str}",
+                show_alert=True,
+            )
+            await render_user_card_for_callback(callback, telegram_id)
+        else:
+            await callback.answer("❌ Пользователь не найден", show_alert=True)
+
+    except Exception as e:
+        logger.error("unlimited_grant_error", error=str(e))
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin:unlimited_revoke:"))
+async def callback_unlimited_revoke(callback: CallbackQuery, state: FSMContext) -> None:
+    """Забрать безлимит."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    telegram_id = int(callback.data.split(":")[-1])
+
+    try:
+        success = await admin_revoke_unlimited(
+            admin_id=callback.from_user.id,
+            telegram_id=telegram_id,
+            reason="Управление безлимитом через админ-панель",
+        )
+
+        if success:
+            await callback.answer("✅ Безлимит снят", show_alert=True)
+            await render_user_card_for_callback(callback, telegram_id)
+        else:
+            await callback.answer("❌ Пользователь не найден", show_alert=True)
+
+    except Exception as e:
+        logger.error("unlimited_revoke_error", error=str(e))
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+# ============================================================
+# ИДЕИ
+# ============================================================
+
+@router.callback_query(F.data == "admin:ideas")
+async def callback_ideas_list(callback: CallbackQuery, state: FSMContext) -> None:
+    """Показать список идей."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    
+    data = await state.get_data()
+    page = data.get("ideas_page", 1)
+    sort_by = data.get("ideas_sort", "created_at")
+    status_filter = data.get("ideas_status")
+    
+    try:
+        ideas, total = await get_ideas_paginated(
+            page=page,
+            per_page=ITEMS_PER_PAGE,
+            status=status_filter,
+            sort_by=sort_by,
+        )
+        
+        total_pages = math.ceil(total / ITEMS_PER_PAGE) or 1
+        
+        ideas_data = []
+        for idea in ideas:
+            ideas_data.append({
+                "id": idea.id,
+                "username": idea.user.username if idea.user else None,
+                "status": idea.status,
+                "reward_credits": idea.reward_credits,
+                "created_at": idea.created_at,
+            })
+        
+        status_text = IDEA_STATUS_NAMES.get(status_filter, "Все") if status_filter else "Все"
+        
+        text = (
+            f"💡 <b>ИДЕИ</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Всего: {total} | Страница {page}/{total_pages}\n"
+            f"Статус: {status_text} | Сортировка: {sort_by}\n\n"
+            f"Выберите идею для просмотра:"
+        )
+        
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=get_ideas_list_keyboard(
+                    ideas=ideas_data,
+                    page=page,
+                    total_pages=total_pages,
+                    sort_by=sort_by,
+                    status_filter=status_filter,
+                ),
+            )
+        except Exception as edit_error:
+            if "message is not modified" in str(edit_error).lower():
+                await callback.answer()
+                return
+            raise
+        
+    except Exception as e:
+        logger.error("ideas_list_error", error=str(e))
+        await callback.answer("❌ Ошибка загрузки", show_alert=True)
+    
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:ideas_page:"))
+async def callback_ideas_page(callback: CallbackQuery, state: FSMContext) -> None:
+    """Переключить страницу идей."""
+    page = int(callback.data.split(":")[-1])
+    await state.update_data(ideas_page=page)
+    await callback_ideas_list(callback, state)
+
+
+@router.callback_query(F.data.startswith("admin:ideas_sort:"))
+async def callback_ideas_sort(callback: CallbackQuery, state: FSMContext) -> None:
+    """Изменить сортировку идей."""
+    sort_by = callback.data.split(":")[-1]
+    await state.update_data(ideas_sort=sort_by, ideas_page=1)
+    await callback_ideas_list(callback, state)
+
+
+@router.callback_query(F.data.startswith("admin:ideas_status:"))
+async def callback_ideas_status(callback: CallbackQuery, state: FSMContext) -> None:
+    """Изменить фильтр статуса идей."""
+    status = callback.data.split(":")[-1]
+    if status == "all":
+        await state.update_data(ideas_status=None, ideas_page=1)
+    else:
+        await state.update_data(ideas_status=status, ideas_page=1)
+    await callback_ideas_list(callback, state)
+
+
+@router.callback_query(F.data.startswith("admin:idea:"))
+async def callback_idea_card(callback: CallbackQuery, state: FSMContext) -> None:
+    """Показать карточку идеи."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    
+    idea_id = int(callback.data.split(":")[-1])
+    
+    try:
+        info = await get_idea_full_info(idea_id)
+        if not info:
+            await callback.answer("❌ Идея не найдена", show_alert=True)
+            return
+        
+        username = info.get("username") or "Аноним"
+        created_at = info.get("created_at")
+        created_str = created_at.strftime("%d.%m.%Y %H:%M") if created_at else "?"
+        decided_at = info.get("decided_at")
+        decided_str = decided_at.strftime("%d.%m.%Y %H:%M") if decided_at else "—"
+        status = info.get("status", "new")
+        status_name = IDEA_STATUS_NAMES.get(status, status)
+        reward = info.get("reward_credits", 0)
+        
+        text = (
+            f"💡 <b>ИДЕЯ #{info['id']}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👤 <b>Пользователь:</b> @{username}\n"
+            f"🆔 <b>Telegram ID:</b> <code>{info.get('user_telegram_id')}</code>\n\n"
+            f"📌 <b>Статус:</b> {status_name}\n"
+            f"🎁 <b>Награда:</b> {reward} кредитов\n"
+            f"📅 <b>Создано:</b> {created_str}\n"
+            f"✅ <b>Решение:</b> {decided_str}\n\n"
+            f"💬 <b>Текст идеи:</b>\n{info.get('text')}")
+        
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_idea_card_keyboard(idea_id=info["id"], status=status),
+        )
+        
+    except Exception as e:
+        logger.error("idea_card_error", error=str(e))
+        await callback.answer("❌ Ошибка", show_alert=True)
+    
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:idea_approve:"))
+async def callback_idea_approve(callback: CallbackQuery, state: FSMContext) -> None:
+    """Одобрить идею и начислить награду."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    
+    idea_id = int(callback.data.split(":")[-1])
+    
+    result = await admin_approve_idea(
+        admin_id=callback.from_user.id,
+        idea_id=idea_id,
+        reward_credits=2,
+    )
+    
+    if result == "not_found":
+        await callback.answer("❌ Идея не найдена", show_alert=True)
+        return
+    if result == "already":
+        await callback.answer("ℹ️ Уже одобрено", show_alert=True)
+        await callback_idea_card(callback, state)
+        return
+    
+    # Уведомляем пользователя
+    try:
+        info = await get_idea_full_info(idea_id)
+        if info and info.get("user_telegram_id"):
+            await callback.bot.send_message(
+                chat_id=info["user_telegram_id"],
+                text="🎉 Ваша идея одобрена!\n\nМы начислили вам +2 кредита. Спасибо за вклад!",
+            )
+    except Exception as e:
+        logger.warning("idea_notify_failed", error=str(e), idea_id=idea_id)
+    
+    await callback.answer("✅ Идея одобрена", show_alert=True)
+    await callback_idea_card(callback, state)
+
+
+@router.callback_query(F.data.startswith("admin:idea_reject:"))
+async def callback_idea_reject(callback: CallbackQuery, state: FSMContext) -> None:
+    """Отклонить идею."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    
+    idea_id = int(callback.data.split(":")[-1])
+    
+    result = await admin_reject_idea(
+        admin_id=callback.from_user.id,
+        idea_id=idea_id,
+    )
+    
+    if result == "not_found":
+        await callback.answer("❌ Идея не найдена", show_alert=True)
+        return
+    if result == "already":
+        await callback.answer("ℹ️ Уже отклонено", show_alert=True)
+        await callback_idea_card(callback, state)
+        return
+    
+    await callback.answer("❌ Идея отклонена", show_alert=True)
+    await callback_idea_card(callback, state)
 
 
 # ============================================================

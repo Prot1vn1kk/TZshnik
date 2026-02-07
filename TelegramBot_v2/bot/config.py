@@ -43,7 +43,24 @@ class Settings(BaseSettings):
     yookassa_provider_token: str = ""
     
     # ========== Database ==========
-    database_url: str = f"sqlite+aiosqlite:///{BASE_DIR / 'data' / 'database.sqlite'}"
+    @property
+    def database_url(self) -> str:
+        """
+        Формирует URL базы данных.
+        Если в окружении задан DATABASE_URL, проверяет его на относительность для SQLite.
+        """
+        import os
+        url = os.getenv("DATABASE_URL")
+        if url:
+            # Если это SQLite и путь относительный (3 слэша), делаем его абсолютным
+            if url.startswith("sqlite+aiosqlite:///"):
+                path_part = url.replace("sqlite+aiosqlite:///", "")
+                if not path_part.startswith("/"):
+                    return f"sqlite+aiosqlite:///{BASE_DIR / path_part}"
+            return url
+        
+        # Дефолтный путь
+        return f"sqlite+aiosqlite:///{BASE_DIR / 'data' / 'database.sqlite'}"
     
     # ========== Application Settings ==========
     debug: bool = False

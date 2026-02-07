@@ -914,7 +914,7 @@ async def cmd_balance(message: Message, user: User) -> None:
     """Команда /balance - показать баланс."""
     telegram_id = message.from_user.id if message.from_user else 0
     stats = await get_user_stats(telegram_id)
-    
+
     if is_unlimited_active(user):
         status_text = "👑 Безлимит активен"
     elif user.balance > 5:
@@ -923,29 +923,37 @@ async def cmd_balance(message: Message, user: User) -> None:
         status_text = "⚠️ Кредиты заканчиваются, пополните баланс"
     else:
         status_text = "❌ Кредиты закончились! Пополните баланс"
-    
+
+    total = stats.get("generations_count", 0)
+
     text = BALANCE_MESSAGE.format(
         balance=get_balance_display(user),
-        total_generations=stats.get("total_generations", 0),
-        successful=stats.get("successful_generations", 0),
+        total_generations=total,
+        successful=total,
         status_text=status_text,
     )
-    
+
     await message.answer(text, reply_markup=get_balance_keyboard())
 
 
 @router.message(Command("buy"))
 async def cmd_buy(message: Message, user: User) -> None:
     """Команда /buy - купить кредиты."""
-    from bot.handlers.payments import callback_show_packages
+    from bot.keyboards import get_packages_keyboard
 
-    # Имитируем callback для показа пакетов
-    class FakeCallback:
-        from_user = message.from_user
-        message = message
-        async def answer(self, *args, **kwargs): pass
-
-    await callback_show_packages(FakeCallback(), user)
+    await message.answer(
+        "💳 <b>Выбери пакет кредитов:</b>\n\n"
+        "🎁 <b>Пробный</b> — 3 ТЗ за 79₽\n"
+        "🔹 <b>Старт</b> — 5 ТЗ за 129₽\n"
+        "📦 <b>Базовый</b> — 10 ТЗ за 229₽\n"
+        "⭐ <b>Оптимальный</b> — 25 ТЗ за 449₽ 🔥\n"
+        "🚀 <b>Профи</b> — 50 ТЗ за 749₽\n"
+        "💼 <b>Бизнес</b> — 100 ТЗ за 1 290₽ 💎\n"
+        "🏢 <b>Корпоративный</b> — 250 ТЗ за 2 790₽\n\n"
+        "👑 <b>БЕЗЛИМИТ</b> — 1 790₽/месяц\n\n"
+        "Выбери подходящий пакет:",
+        reply_markup=get_packages_keyboard(),
+    )
 
 
 @router.message(Command("history"))
@@ -1122,12 +1130,14 @@ async def btn_examples(message: Message, user: User) -> None:
 async def btn_buy_credits(message: Message) -> None:
     """Кнопка "Купить кредиты" - показывает пакеты."""
     from bot.keyboards import get_packages_keyboard
-    
+
     await message.answer(
         "💳 <b>Выбери пакет кредитов:</b>\n\n"
-        "🔹 <b>Старт</b> — 5 ТЗ за 149₽ (30₽/шт)\n"
-        "⭐ <b>Оптимальный</b> — 20 ТЗ за 399₽ (20₽/шт)\n"
-        "🚀 <b>Профи</b> — 50 ТЗ за 699₽ (14₽/шт)\n\n"
+        "🎁 <b>Пробный</b> — 3 ТЗ за 79₽\n"
+        "🔹 <b>Старт</b> — 5 ТЗ за 129₽\n"
+        "📦 <b>Базовый</b> — 10 ТЗ за 229₽\n"
+        "⭐ <b>Оптимальный</b> — 25 ТЗ за 449₽ 🔥\n"
+        "🚀 <b>Профи</b> — 50 ТЗ за 749₽\n\n"
         "Выбери подходящий пакет:",
         reply_markup=get_packages_keyboard(),
     )
@@ -1531,13 +1541,3 @@ async def callback_cancel_idea(callback: CallbackQuery, state: FSMContext, user:
     )
 
 
-@router.callback_query(F.data == "cancel")
-async def callback_cancel(callback: CallbackQuery, user: User) -> None:
-    """Callback для кнопки 'Отмена' - возвращает в главное меню."""
-    from bot.keyboards import get_main_menu_keyboard
-    
-    await callback.answer()
-    await callback.message.edit_text(
-        MENU_MESSAGE,
-        reply_markup=get_main_menu_keyboard(),
-    )

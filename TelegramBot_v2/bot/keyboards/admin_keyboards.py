@@ -30,6 +30,17 @@ CATEGORY_NAMES = {
 
 
 # ============================================================
+# ИДЕИ (статусы)
+# ============================================================
+
+IDEA_STATUS_NAMES = {
+    "new": "🆕 Новые",
+    "approved": "✅ Одобрены",
+    "rejected": "❌ Отклонены",
+}
+
+
+# ============================================================
 # ГЛАВНОЕ МЕНЮ
 # ============================================================
 
@@ -43,14 +54,143 @@ def get_admin_main_keyboard() -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(text="💳 Платежи", callback_data="admin:payments"),
-        InlineKeyboardButton(text="📊 Аналитика", callback_data="admin:analytics"),
+        InlineKeyboardButton(text="💡 Идеи", callback_data="admin:ideas"),
     )
     builder.row(
+        InlineKeyboardButton(text="📊 Аналитика", callback_data="admin:analytics"),
         InlineKeyboardButton(text="🔧 Настройки", callback_data="admin:settings"),
+    )
+    builder.row(
         InlineKeyboardButton(text="📋 Логи", callback_data="admin:logs"),
     )
     builder.row(
         InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:refresh"),
+    )
+    
+    return builder.as_markup()
+
+
+# ============================================================
+# ИДЕИ
+# ============================================================
+
+def get_ideas_list_keyboard(
+    ideas: List[Dict[str, Any]],
+    page: int,
+    total_pages: int,
+    sort_by: str = "created_at",
+    status_filter: Optional[str] = None,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура списка идей с пагинацией и сортировкой.
+    """
+    builder = InlineKeyboardBuilder()
+    
+    status_emoji = {
+        "new": "🆕",
+        "approved": "✅",
+        "rejected": "❌",
+    }
+    
+    for idea in ideas:
+        username = idea.get("username") or "Аноним"
+        idea_id = idea.get("id")
+        status = idea.get("status", "new")
+        emoji = status_emoji.get(status, "📝")
+        
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{emoji} @{username} | ID {idea_id}",
+                callback_data=f"admin:idea:{idea_id}",
+            )
+        )
+    
+    # Пагинация
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(
+            InlineKeyboardButton(text="◀️", callback_data=f"admin:ideas_page:{page-1}")
+        )
+    nav_buttons.append(
+        InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="admin:ideas_info")
+    )
+    if page < total_pages:
+        nav_buttons.append(
+            InlineKeyboardButton(text="▶️", callback_data=f"admin:ideas_page:{page+1}")
+        )
+    if nav_buttons:
+        builder.row(*nav_buttons)
+    
+    # Фильтр по статусу
+    builder.row(
+        InlineKeyboardButton(
+            text="🆕 Новые" + (" ✓" if status_filter == "new" else ""),
+            callback_data="admin:ideas_status:new",
+        ),
+        InlineKeyboardButton(
+            text="✅ Одобр" + (" ✓" if status_filter == "approved" else ""),
+            callback_data="admin:ideas_status:approved",
+        ),
+        InlineKeyboardButton(
+            text="❌ Откл" + (" ✓" if status_filter == "rejected" else ""),
+            callback_data="admin:ideas_status:rejected",
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🔄 Все" + (" ✓" if not status_filter else ""),
+            callback_data="admin:ideas_status:all",
+        ),
+    )
+    
+    # Сортировка
+    builder.row(
+        InlineKeyboardButton(
+            text="📅 По дате" + (" ✓" if sort_by == "created_at" else ""),
+            callback_data="admin:ideas_sort:created_at",
+        ),
+        InlineKeyboardButton(
+            text="🧾 По статусу" + (" ✓" if sort_by == "status" else ""),
+            callback_data="admin:ideas_sort:status",
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🎁 По награде" + (" ✓" if sort_by == "reward_credits" else ""),
+            callback_data="admin:ideas_sort:reward_credits",
+        ),
+    )
+    
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Главное меню", callback_data="admin:main"),
+    )
+    
+    return builder.as_markup()
+
+
+def get_idea_card_keyboard(
+    idea_id: int,
+    status: str,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура карточки идеи.
+    """
+    builder = InlineKeyboardBuilder()
+    
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Одобрить (+2)",
+            callback_data=f"admin:idea_approve:{idea_id}",
+        ),
+        InlineKeyboardButton(
+            text="❌ Отклонить",
+            callback_data=f"admin:idea_reject:{idea_id}",
+        ),
+    )
+    
+    builder.row(
+        InlineKeyboardButton(text="⬅️ К списку", callback_data="admin:ideas"),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="admin:main"),
     )
     
     return builder.as_markup()
@@ -203,6 +343,14 @@ def get_user_card_keyboard(
             callback_data=f"admin:user_payments:{telegram_id}",
         ),
     )
+
+    # Безлимит
+    builder.row(
+        InlineKeyboardButton(
+            text="♾ Безлимит",
+            callback_data=f"admin:unlimited:{telegram_id}",
+        ),
+    )
     
     # Назад
     builder.row(
@@ -210,6 +358,39 @@ def get_user_card_keyboard(
         InlineKeyboardButton(text="🏠 Меню", callback_data="admin:main"),
     )
     
+    return builder.as_markup()
+
+
+def get_unlimited_manage_keyboard(
+    telegram_id: int,
+    is_active: bool = False,
+) -> InlineKeyboardMarkup:
+    """Клавиатура управления безлимитом."""
+    builder = InlineKeyboardBuilder()
+
+    durations = [7, 30, 90, 180, 365]
+    label_prefix = "⏳ +" if is_active else "♾ "
+
+    for days in durations:
+        builder.button(
+            text=f"{label_prefix}{days}д",
+            callback_data=f"admin:unlimited_grant:{telegram_id}:{days}",
+        )
+
+    builder.adjust(3)
+
+    builder.row(
+        InlineKeyboardButton(
+            text="🛑 Забрать",
+            callback_data=f"admin:unlimited_revoke:{telegram_id}",
+        ),
+    )
+
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin:user:{telegram_id}"),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="admin:main"),
+    )
+
     return builder.as_markup()
 
 

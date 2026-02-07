@@ -12,8 +12,6 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 import structlog
 
-from database.models import User
-from database import get_user_payments
 from bot.keyboards import get_main_menu_keyboard
 
 
@@ -24,54 +22,6 @@ router = Router(name="common")
 # ============================================================
 # ОТМЕНА ПЛАТЕЖА
 # ============================================================
-
-@router.callback_query(F.data == "cancel_payment")
-async def callback_cancel_payment(callback: CallbackQuery, state: FSMContext) -> None:
-    """Отменить процесс оплаты."""
-    await callback.answer()
-    await state.clear()
-    
-    if callback.message:
-        await callback.message.edit_text(
-            "❌ Покупка отменена.\n\n"
-            "Вы можете вернуться к выбору пакета в любой момент.",
-        )
-
-
-@router.callback_query(F.data == "payment_history")
-async def callback_payment_history(
-    callback: CallbackQuery,
-    user: User,
-) -> None:
-    """История платежей пользователя."""
-    await callback.answer()
-    
-    telegram_id = callback.from_user.id if callback.from_user else 0
-    payments = await get_user_payments(telegram_id, limit=10)
-    
-    if not payments:
-        if callback.message:
-            await callback.message.edit_text(
-                "💳 *История платежей*\n\n"
-                "У вас пока нет платежей.",
-                parse_mode="Markdown",
-            )
-        return
-    
-    lines = ["💳 *История платежей:*\n"]
-    
-    for payment in payments:
-        status_emoji = "✅" if payment.status == "completed" else "⏳"
-        date_str = payment.created_at.strftime("%d.%m.%Y")
-        amount_rub = payment.amount / 100  # Из копеек в рубли
-        lines.append(f"{status_emoji} {date_str} — {amount_rub:.0f}₽ ({payment.credits_added} ТЗ)")
-    
-    if callback.message:
-        await callback.message.edit_text(
-            "\n".join(lines),
-            parse_mode="Markdown",
-        )
-
 
 @router.callback_query(F.data == "back")
 async def callback_back(

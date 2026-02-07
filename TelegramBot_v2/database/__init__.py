@@ -14,6 +14,7 @@ from database.models import (
     Base,
     BotSettings,
     Feedback,
+    Idea,
     Generation,
     GenerationPhoto,
     Payment,
@@ -26,9 +27,10 @@ from database.crud import (
     get_user_balance,
     decrease_balance,
     increase_balance,
+    is_unlimited_active,
+    activate_unlimited,
     # Generations
     create_generation,
-    update_generation_status,
     get_generation_by_id,
     get_user_generations,
     # Payments
@@ -37,6 +39,8 @@ from database.crud import (
     get_user_payments,
     # Feedback
     create_feedback,
+    # Ideas
+    create_idea,
     # Stats
     get_user_stats,
     get_admin_stats,
@@ -55,6 +59,7 @@ __all__ = [
     "GenerationPhoto",
     "Payment",
     "Feedback",
+    "Idea",
     "AdminAction",
     "BotSettings",
     # CRUD - Users
@@ -63,9 +68,10 @@ __all__ = [
     "get_user_balance",
     "decrease_balance",
     "increase_balance",
+    "is_unlimited_active",
+    "activate_unlimited",
     # CRUD - Generations
     "create_generation",
-    "update_generation_status",
     "get_generation_by_id",
     "get_user_generations",
     # CRUD - Payments
@@ -74,6 +80,8 @@ __all__ = [
     "get_user_payments",
     # CRUD - Feedback
     "create_feedback",
+    # CRUD - Ideas
+    "create_idea",
     # CRUD - Stats
     "get_user_stats",
     "get_admin_stats",

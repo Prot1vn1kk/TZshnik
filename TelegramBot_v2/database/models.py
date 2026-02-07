@@ -50,6 +50,9 @@ class User(Base):
         balance: Количество доступных кредитов
         total_generated: Общее количество сгенерированных ТЗ
         is_premium: Флаг премиум-пользователя
+        is_unlimited: Флаг активной безлимитной подписки
+        unlimited_until: Дата окончания безлимитной подписки
+        balance_before_unlimited: Баланс до покупки безлимита
         referred_by: ID реферера (если есть)
     """
     
@@ -91,6 +94,18 @@ class User(Base):
         Boolean,
         default=False,
     )
+    is_unlimited: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+    )
+    unlimited_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        nullable=True,
+    )
+    balance_before_unlimited: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
     
     # Реферальная система (self-referential FK)
     referred_by: Mapped[Optional[int]] = mapped_column(
@@ -117,6 +132,11 @@ class User(Base):
         lazy="selectin",
     )
     payments: Mapped[List["Payment"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    ideas: Mapped[List["Idea"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         lazy="selectin",
@@ -408,6 +428,61 @@ class Feedback(Base):
         return f"<Feedback(id={self.id}, gen_id={self.generation_id}, rating={self.rating})>"
 
 
+class Idea(Base):
+    """
+    Идея/предложение от пользователя.
+    
+    Хранит текст идеи и статус модерации.
+    """
+    
+    __tablename__ = "ideas"
+    
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    
+    text: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default="new",
+        index=True,
+    )
+    reward_credits: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+    )
+    decided_by_admin_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    decided_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+    )
+    
+    user: Mapped["User"] = relationship(
+        back_populates="ideas",
+    )
+    
+    def __repr__(self) -> str:
+        return f"<Idea(id={self.id}, user_id={self.user_id}, status={self.status})>"
+
+
 class AdminAction(Base):
     """
     Логирование действий администратора.
@@ -516,3 +591,4 @@ class BotSettings(Base):
 Index("ix_generations_user_created", Generation.user_id, Generation.created_at.desc())
 Index("ix_payments_user_created", Payment.user_id, Payment.created_at.desc())
 Index("ix_admin_actions_created", AdminAction.created_at.desc())
+Index("ix_ideas_status_created", Idea.status, Idea.created_at.desc())

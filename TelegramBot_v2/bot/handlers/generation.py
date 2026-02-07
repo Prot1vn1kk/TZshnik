@@ -20,6 +20,7 @@ from database import (
     increase_balance,
     get_generation_by_id,
     create_feedback,
+    is_unlimited_active,
 )
 from database.crud import update_generation_tz
 from database.models import User
@@ -409,11 +410,10 @@ async def callback_category_selected(
         return
     
     # Проверяем баланс
-    if user.balance <= 0:
+    if user.balance <= 0 and not is_unlimited_active(user):
         await callback.message.edit_text(
-            "❌ *Недостаточно кредитов!*\n\n"
+            "❌ <b>Недостаточно кредитов!</b>\n\n"
             "Пополните баланс, чтобы создавать ТЗ.",
-            parse_mode="Markdown",
         )
         await state.clear()
         return
@@ -610,7 +610,7 @@ async def callback_regenerate(
         return
     
     # Проверяем баланс
-    if user.balance <= 0:
+    if user.balance <= 0 and not is_unlimited_active(user):
         await callback.answer("Недостаточно кредитов для перегенерации!", show_alert=True)
         return
     
@@ -743,13 +743,12 @@ async def callback_new_generation(
     await callback.answer()
     
     # Проверяем баланс
-    if user.balance <= 0:
+    if user.balance <= 0 and not is_unlimited_active(user):
         if callback.message:
             await callback.message.answer(
-                "❌ *У вас закончились кредиты!*\n\n"
-                "Нажмите 💳 *Купить кредиты* для пополнения.",
+                "❌ <b>У вас закончились кредиты!</b>\n\n"
+                "Нажмите 💳 <b>Купить кредиты</b> для пополнения.",
                 reply_markup=get_main_menu_keyboard(),
-                parse_mode="Markdown",
             )
         return
     
@@ -759,7 +758,6 @@ async def callback_new_generation(
     
     if callback.message:
         await callback.message.answer(
-            "📷 *Отправьте фото товара*\n\n"
+            "📷 <b>Отправьте фото товара</b>\n\n"
             "Вы можете отправить от 1 до 5 фотографий.",
-            parse_mode="Markdown",
         )

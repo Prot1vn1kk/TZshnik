@@ -10,6 +10,7 @@
 """
 
 import structlog
+import math
 from datetime import datetime, timedelta
 from aiogram import Router, F, Bot
 from aiogram.types import (
@@ -32,7 +33,7 @@ from config.packages import (
     calculate_savings,
     BASE_PRICE_PER_CREDIT,
 )
-from database import increase_balance, create_payment
+from database import increase_balance, create_payment, activate_unlimited, is_unlimited_active
 from database.models import User
 from bot.keyboards import get_main_menu_keyboard
 
@@ -52,11 +53,21 @@ def format_number(num: int) -> str:
 
 def get_subscription_status(user: User) -> dict:
     """Получить статус подписки пользователя."""
-    # TODO: Интегрировать с БД для хранения подписок
+    if not is_unlimited_active(user):
+        return {
+            "is_unlimited": False,
+            "unlimited_until": None,
+            "days_left": 0,
+        }
+
+    now = datetime.utcnow()
+    delta = user.unlimited_until - now if user.unlimited_until else timedelta(0)
+    days_left = max(0, math.ceil(delta.total_seconds() / 86400))
+
     return {
-        "is_unlimited": getattr(user, 'is_unlimited', False),
-        "unlimited_until": getattr(user, 'unlimited_until', None),
-        "days_left": 0,
+        "is_unlimited": True,
+        "unlimited_until": user.unlimited_until,
+        "days_left": days_left,
     }
 
 
@@ -565,11 +576,15 @@ async def handle_successful_payment(
         # Обрабатываем в зависимости от типа пакета
         if package.is_unlimited:
             # Активируем безлимитную подписку
-            # TODO: Добавить поле unlimited_until в модель User
-            # await activate_unlimited(message.from_user.id, package.duration_days)
+            expiry_date = await activate_unlimited(message.from_user.id, package.duration_days)
             
-            new_balance = user.balance  # Баланс не меняется для безлимита
-            expiry_date = datetime.utcnow() + timedelta(days=package.duration_days)
+            if not expiry_date:
+                logger.error("unlimited_activation_failed", user_id=message.from_user.id)
+                await message.answer(
+                    "⚠️ Не удалось активировать безлимит. Обратитесь в поддержку:\n"
+                    "@TZshnik_support_bot"
+                )
+                return
             
             # Сохраняем платёж в БД
             await create_payment(

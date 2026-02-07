@@ -31,7 +31,6 @@ from utils.temp_files import (
     delete_temp_photo,
     clear_user_temp_files,
     read_temp_photo,
-    format_file_list,
     ALLOWED_EXTENSIONS,
 )
 
@@ -142,7 +141,8 @@ def get_photos_from_state(data: dict) -> List[TempPhoto]:
         Список TempPhoto объектов
     """
     photos_data = data.get("photos", [])
-    return [TempPhoto.from_dict(p) for p in photos_data]
+    photos = [TempPhoto.from_dict(p) for p in photos_data]
+    return normalize_photo_orders(photos)
 
 
 def photos_to_state(photos: List[TempPhoto]) -> List[dict]:
@@ -156,6 +156,32 @@ def photos_to_state(photos: List[TempPhoto]) -> List[dict]:
         Список словарей для сохранения в state
     """
     return [p.to_dict() for p in photos]
+
+
+def normalize_photo_orders(photos: List[TempPhoto]) -> List[TempPhoto]:
+    """
+    Устанавливает порядковые номера, если они отсутствуют.
+    """
+    if not photos:
+        return photos
+
+    if any(p.order == 0 for p in photos):
+        for idx, photo in enumerate(photos, 1):
+            if photo.order == 0:
+                photo.order = idx
+
+    return photos
+
+
+def get_next_photo_order(photos: List[TempPhoto]) -> int:
+    """
+    Возвращает следующий стабильный номер для нового фото.
+    """
+    if not photos:
+        return 1
+
+    max_order = max((p.order or 0) for p in photos)
+    return max_order + 1
 
 
 async def process_and_save_photo(
@@ -235,6 +261,7 @@ async def process_album_photos(
         )
         
         if temp_photo:
+            temp_photo.order = get_next_photo_order(photos)
             photos.append(temp_photo)
             success_count += 1
         else:
@@ -244,21 +271,21 @@ async def process_album_photos(
     return photos, success_count, error_count
 
 
-def format_confirmation_message(photos: List[TempPhoto]) -> str:
+def format_confirmation_message(photo_count: int) -> str:
     """
-    Формирует сообщение подтверждения загруженных фото.
+    Формирует сообщение подтверждения загруженных фото (без списка файлов).
     
     Args:
-        photos: Список TempPhoto
+        photo_count: Количество фото
         
     Returns:
         Форматированное сообщение
     """
-    file_list = format_file_list(photos)
+    plural = "фото" if photo_count in [1, 5] else "фотографии" if photo_count < 5 else "фото"
     
     return (
-        f"📸 <b>Вы загрузили {len(photos)} файл(ов)</b>\n\n"
-        f"{file_list}\n\n"
+        f"📸 <b>Вы загрузили {photo_count} {plural}</b>\n\n"
+        f"Посмотрите превью выше 👆 (номер соответствует подписи на фото)\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "Если вы случайно добавили лишний файл — нажмите <b>«Удалить»</b>\n"
         "Если всё верно — нажмите <b>«Подтвердить»</b>"
@@ -354,6 +381,7 @@ async def handle_first_photo(
         )
         return
     
+    temp_photo.order = get_next_photo_order(existing_photos)
     photos = existing_photos + [temp_photo]
     await state.update_data(photos=photos_to_state(photos))
     await state.set_state(GenerationStates.waiting_more_photos)
@@ -458,6 +486,7 @@ async def handle_additional_photo(
         )
         return
     
+    temp_photo.order = get_next_photo_order(existing_photos)
     photos = existing_photos + [temp_photo]
     await state.update_data(photos=photos_to_state(photos))
     
@@ -539,6 +568,7 @@ async def handle_first_document(
             await message.answer(f"❌ {error}")
         return
     
+    temp_photo.order = 1
     await state.update_data(photos=photos_to_state([temp_photo]))
     await state.set_state(GenerationStates.waiting_more_photos)
     
@@ -614,6 +644,7 @@ async def handle_additional_document(
             await message.answer(f"❌ {error}")
         return
     
+    temp_photo.order = get_next_photo_order(existing_photos)
     photos = existing_photos + [temp_photo]
     await state.update_data(photos=photos_to_state(photos))
     
@@ -660,15 +691,17 @@ async def callback_add_more(callback: CallbackQuery) -> None:
 @router.callback_query(GenerationStates.waiting_more_photos, F.data == "confirm_photos")
 async def callback_confirm_photos(
     callback: CallbackQuery,
+    bot: Bot,
     state: FSMContext,
 ) -> None:
     """
     Кнопка "Готово — проверить файлы".
     
-    Показывает список загруженных файлов и предлагает удалить лишние.
+    Показывает превью загруженных фото с номерами.
     """
     data = await state.get_data()
     photos = get_photos_from_state(data)
+    photos_sorted = sorted(photos, key=lambda p: p.order or 0)
     
     if not photos:
         await callback.answer("❌ Сначала загрузите хотя бы одно фото!", show_alert=True)
@@ -677,12 +710,29 @@ async def callback_confirm_photos(
     await callback.answer()
     await state.set_state(GenerationStates.confirming_photos)
     
-    if callback.message:
-        await callback.message.edit_text(
-            format_confirmation_message(photos),
-            reply_markup=get_photo_confirmation_keyboard(),
-            parse_mode="HTML",
-        )
+    # Отправляем превью каждого фото с номером
+    for i, photo in enumerate(photos_sorted, 1):
+        try:
+            photo_bytes = read_temp_photo(photo.path)
+            if photo_bytes:
+                from aiogram.types import BufferedInputFile
+                order_num = photo.order or i
+                await bot.send_photo(
+                    chat_id=callback.message.chat.id,
+                    photo=BufferedInputFile(photo_bytes, filename=f"photo_{i}.jpg"),
+                    caption=f"📷 <b>Фото #{order_num}</b> (по порядку отправки)",
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            logger.error("photo_preview_failed", photo_id=photo.id, error=str(e))
+    
+    # Отправляем сообщение с кнопками подтверждения
+    await bot.send_message(
+        chat_id=callback.message.chat.id,
+        text=format_confirmation_message(len(photos)),
+        reply_markup=get_photo_confirmation_keyboard(),
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(GenerationStates.confirming_photos, F.data == "delete_photos_menu")
@@ -695,6 +745,7 @@ async def callback_delete_menu(
     """
     data = await state.get_data()
     photos = get_photos_from_state(data)
+    photos_sorted = sorted(photos, key=lambda p: p.order or 0)
     
     if not photos:
         await callback.answer("Нет фото для удаления", show_alert=True)
@@ -703,13 +754,12 @@ async def callback_delete_menu(
     await callback.answer()
     await state.set_state(GenerationStates.deleting_photo)
     
-    file_list = format_file_list(photos)
-    
     if callback.message:
         await callback.message.edit_text(
-            f"🗑 <b>Выберите номер файла для удаления:</b>\n\n"
-            f"{file_list}",
-            reply_markup=get_photo_delete_keyboard(len(photos)),
+            f"🗑 <b>Выберите номер фото для удаления:</b>\n\n"
+            f"Смотрите на превью выше и выберите номер фото, которое хотите удалить.\n\n"
+            f"Загружено фото: {len(photos)}",
+            reply_markup=get_photo_delete_keyboard([p.order for p in photos_sorted]),
             parse_mode="HTML",
         )
 
@@ -728,19 +778,19 @@ async def callback_delete_photo(
     data = await state.get_data()
     photos = get_photos_from_state(data)
     
-    if photo_number < 1 or photo_number > len(photos):
-        await callback.answer("❌ Неверный номер файла", show_alert=True)
+    photo_to_delete = next((p for p in photos if p.order == photo_number), None)
+    if not photo_to_delete:
+        await callback.answer("❌ Неверный номер фото", show_alert=True)
         return
     
     # Удаляем фото
-    photo_to_delete = photos[photo_number - 1]
     delete_temp_photo(user_id, photo_to_delete.id)
     
     # Обновляем список
-    photos.pop(photo_number - 1)
+    photos = [p for p in photos if p.order != photo_number]
     await state.update_data(photos=photos_to_state(photos))
     
-    await callback.answer(f"✅ Файл #{photo_number} удалён")
+    await callback.answer(f"✅ Фото #{photo_number} удалено")
     
     logger.info(
         "photo_deleted",
@@ -763,7 +813,7 @@ async def callback_delete_photo(
         await state.set_state(GenerationStates.confirming_photos)
         if callback.message:
             await callback.message.edit_text(
-                format_confirmation_message(photos),
+                format_confirmation_message(len(photos)),
                 reply_markup=get_photo_confirmation_keyboard(),
                 parse_mode="HTML",
             )
@@ -785,7 +835,7 @@ async def callback_back_to_confirmation(
     
     if callback.message:
         await callback.message.edit_text(
-            format_confirmation_message(photos),
+            format_confirmation_message(len(photos)),
             reply_markup=get_photo_confirmation_keyboard(),
             parse_mode="HTML",
         )
@@ -833,12 +883,13 @@ async def callback_photos_confirmed(
 @router.callback_query(GenerationStates.waiting_more_photos, F.data == "continue_generation")
 async def callback_continue_legacy(
     callback: CallbackQuery,
+    bot: Bot,
     state: FSMContext,
 ) -> None:
     """
     Старая кнопка "Продолжить" — редирект на новый флоу.
     """
-    await callback_confirm_photos(callback, state)
+    await callback_confirm_photos(callback, bot, state)
 
 
 @router.callback_query(F.data == "cancel")
@@ -906,7 +957,7 @@ async def handle_message_in_confirmation(
     photos = get_photos_from_state(data)
     
     await message.answer(
-        format_confirmation_message(photos),
+        format_confirmation_message(len(photos)),
         reply_markup=get_photo_confirmation_keyboard(),
         parse_mode="HTML",
     )
@@ -920,13 +971,12 @@ async def handle_message_in_deletion(
     """Любое сообщение в режиме удаления."""
     data = await state.get_data()
     photos = get_photos_from_state(data)
-    
-    file_list = format_file_list(photos)
+    photos_sorted = sorted(photos, key=lambda p: p.order or 0)
     
     await message.answer(
-        f"🗑 <b>Выберите номер файла для удаления:</b>\n\n"
-        f"{file_list}\n\n"
-        "Используйте кнопки ниже.",
-        reply_markup=get_photo_delete_keyboard(len(photos)),
+        f"🗑 <b>Выберите номер фото для удаления:</b>\n\n"
+        "Смотрите на превью выше и выберите номер фото, которое хотите удалить.\n\n"
+        f"Загружено фото: {len(photos)}",
+        reply_markup=get_photo_delete_keyboard([p.order for p in photos_sorted]),
         parse_mode="HTML",
     )

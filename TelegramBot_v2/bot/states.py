@@ -89,3 +89,10 @@ class AdminStates(StatesGroup):
     
     # Просмотр полного анализа
     viewing_full_analysis = State()
+
+
+class IdeaStates(StatesGroup):
+    """Состояния для отправки идеи модераторам."""
+    
+    # Ожидание текста идеи от пользователя
+    waiting_idea_text = State()

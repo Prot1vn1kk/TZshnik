@@ -23,6 +23,7 @@ from database.models import (
     AdminAction,
     BotSettings,
     Feedback,
+    Idea,
     Generation,
     GenerationPhoto,
     Payment,
@@ -31,6 +32,34 @@ from database.models import (
 
 
 logger = structlog.get_logger()
+
+
+def _normalize_unlimited_status(user: User, now: Optional[datetime] = None) -> bool:
+    """Синхронизировать статус безлимита (сбросить если истёк)."""
+    now = now or datetime.utcnow()
+    if not user.is_unlimited:
+        return False
+
+    if not user.unlimited_until:
+        user.is_unlimited = False
+        user.balance_before_unlimited = None
+        return True
+
+    if user.unlimited_until <= now:
+        restored_balance = user.balance_before_unlimited
+        if restored_balance is not None:
+            user.balance = restored_balance
+        user.is_unlimited = False
+        user.unlimited_until = None
+        user.balance_before_unlimited = None
+        logger.info(
+            "unlimited_expired",
+            telegram_id=user.telegram_id,
+            restored_balance=user.balance,
+        )
+        return True
+
+    return False
 
 
 # ==================== ADMIN ACTIONS LOG ====================
@@ -341,6 +370,9 @@ async def get_user_full_info(telegram_id: int) -> Optional[Dict[str, Any]]:
         if not user:
             return None
         
+        # Проверяем статус безлимита
+        _normalize_unlimited_status(user)
+
         # Количество генераций
         gen_count_result = await session.execute(
             select(func.count(Generation.id))
@@ -379,6 +411,9 @@ async def get_user_full_info(telegram_id: int) -> Optional[Dict[str, Any]]:
             "balance": user.balance,
             "total_generated": user.total_generated,
             "is_premium": user.is_premium,
+            "is_unlimited": user.is_unlimited,
+            "unlimited_until": user.unlimited_until,
+            "balance_before_unlimited": user.balance_before_unlimited,
             "created_at": user.created_at,
             "generations_count": generations_count,
             "payments_count": payments_count,
@@ -568,6 +603,281 @@ async def admin_unblock_user(
             return True
         
         return False
+
+
+async def admin_grant_unlimited(
+    admin_id: int,
+    telegram_id: int,
+    duration_days: int,
+    reason: Optional[str] = None,
+) -> Optional[datetime]:
+    """Выдать или продлить безлимит пользователю."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == telegram_id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            return None
+
+        now = datetime.utcnow()
+        _normalize_unlimited_status(user, now)
+
+        start_from = (
+            user.unlimited_until
+            if user.unlimited_until and user.unlimited_until > now
+            else now
+        )
+        new_until = start_from + timedelta(days=duration_days)
+
+        if user.balance_before_unlimited is None:
+            user.balance_before_unlimited = user.balance
+
+        user.is_unlimited = True
+        user.unlimited_until = new_until
+
+        await log_admin_action(
+            admin_id=admin_id,
+            action_type="unlimited_grant",
+            target_user_id=telegram_id,
+            details={
+                "duration_days": duration_days,
+                "reason": reason,
+                "unlimited_until": new_until.isoformat(),
+            },
+            session=session,
+        )
+
+        logger.info(
+            "unlimited_granted",
+            admin_id=admin_id,
+            target_user_id=telegram_id,
+            duration_days=duration_days,
+            unlimited_until=new_until.isoformat(),
+        )
+
+        return new_until
+
+
+async def admin_revoke_unlimited(
+    admin_id: int,
+    telegram_id: int,
+    reason: Optional[str] = None,
+) -> bool:
+    """Забрать безлимит у пользователя."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == telegram_id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            return False
+
+        restored_balance = user.balance_before_unlimited
+        if restored_balance is not None:
+            user.balance = restored_balance
+
+        user.is_unlimited = False
+        user.unlimited_until = None
+        user.balance_before_unlimited = None
+
+        await log_admin_action(
+            admin_id=admin_id,
+            action_type="unlimited_revoke",
+            target_user_id=telegram_id,
+            details={
+                "reason": reason,
+                "restored_balance": restored_balance,
+            },
+            session=session,
+        )
+
+        logger.info(
+            "unlimited_revoked",
+            admin_id=admin_id,
+            target_user_id=telegram_id,
+        )
+
+        return True
+
+
+# ==================== IDEAS MANAGEMENT ====================
+
+async def get_ideas_paginated(
+    page: int = 1,
+    per_page: int = 10,
+    status: Optional[str] = None,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+) -> Tuple[List[Idea], int]:
+    """
+    Получить идеи с пагинацией и сортировкой.
+    
+    Args:
+        page: Номер страницы
+        per_page: Количество на странице
+        status: Фильтр по статусу (new, approved, rejected)
+        sort_by: Поле сортировки (created_at, status, reward_credits)
+        sort_order: Направление сортировки (asc, desc)
+    
+    Returns:
+        Tuple[список идей, общее количество]
+    """
+    async with get_session() as session:
+        query = (
+            select(Idea)
+            .options(selectinload(Idea.user))
+        )
+        count_query = select(func.count(Idea.id))
+        
+        if status:
+            query = query.where(Idea.status == status)
+            count_query = count_query.where(Idea.status == status)
+        
+        sort_column = getattr(Idea, sort_by, Idea.created_at)
+        if sort_order == "desc":
+            query = query.order_by(desc(sort_column))
+        else:
+            query = query.order_by(sort_column)
+        
+        offset = (page - 1) * per_page
+        query = query.limit(per_page).offset(offset)
+        
+        ideas_result = await session.execute(query)
+        count_result = await session.execute(count_query)
+        
+        ideas = list(ideas_result.scalars().all())
+        total = count_result.scalar() or 0
+        
+        return ideas, total
+
+
+async def get_idea_full_info(idea_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Получить полную информацию об идее.
+    """
+    async with get_session() as session:
+        result = await session.execute(
+            select(Idea)
+            .options(selectinload(Idea.user))
+            .where(Idea.id == idea_id)
+        )
+        idea = result.scalar_one_or_none()
+        
+        if not idea:
+            return None
+        
+        return {
+            "id": idea.id,
+            "user_telegram_id": idea.user.telegram_id if idea.user else None,
+            "username": idea.user.username if idea.user else None,
+            "text": idea.text,
+            "status": idea.status,
+            "reward_credits": idea.reward_credits,
+            "created_at": idea.created_at,
+            "decided_at": idea.decided_at,
+            "decided_by_admin_id": idea.decided_by_admin_id,
+        }
+
+
+async def admin_approve_idea(
+    admin_id: int,
+    idea_id: int,
+    reward_credits: int = 2,
+) -> str:
+    """
+    Одобрить идею и начислить кредиты.
+    
+    Returns:
+        "ok" | "not_found" | "already"
+    """
+    async with get_session() as session:
+        result = await session.execute(
+            select(Idea).where(Idea.id == idea_id)
+        )
+        idea = result.scalar_one_or_none()
+        
+        if not idea:
+            return "not_found"
+        
+        if idea.status == "approved":
+            return "already"
+        
+        # Обновляем статус идеи
+        idea.status = "approved"
+        idea.reward_credits = reward_credits
+        idea.decided_by_admin_id = admin_id
+        idea.decided_at = datetime.now()
+        
+        # Начисляем кредиты пользователю
+        await session.execute(
+            update(User)
+            .where(User.id == idea.user_id)
+            .values(balance=User.balance + reward_credits)
+        )
+        
+        await log_admin_action(
+            admin_id=admin_id,
+            action_type="idea_approved",
+            target_user_id=None,
+            details={"idea_id": idea_id, "reward": reward_credits},
+            session=session,
+        )
+        
+        logger.info(
+            "idea_approved",
+            admin_id=admin_id,
+            idea_id=idea_id,
+            reward_credits=reward_credits,
+        )
+        
+        return "ok"
+
+
+async def admin_reject_idea(
+    admin_id: int,
+    idea_id: int,
+) -> str:
+    """
+    Отклонить идею.
+    
+    Returns:
+        "ok" | "not_found" | "already"
+    """
+    async with get_session() as session:
+        result = await session.execute(
+            select(Idea).where(Idea.id == idea_id)
+        )
+        idea = result.scalar_one_or_none()
+        
+        if not idea:
+            return "not_found"
+        
+        if idea.status == "rejected":
+            return "already"
+        
+        idea.status = "rejected"
+        idea.reward_credits = 0
+        idea.decided_by_admin_id = admin_id
+        idea.decided_at = datetime.now()
+        
+        await log_admin_action(
+            admin_id=admin_id,
+            action_type="idea_rejected",
+            target_user_id=None,
+            details={"idea_id": idea_id},
+            session=session,
+        )
+        
+        logger.info(
+            "idea_rejected",
+            admin_id=admin_id,
+            idea_id=idea_id,
+        )
+        
+        return "ok"
 
 
 # ==================== GENERATIONS MANAGEMENT ====================

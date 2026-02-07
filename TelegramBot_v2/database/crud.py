@@ -12,7 +12,7 @@ import structlog
 from sqlalchemy import desc, func, select, update
 
 from database.database import get_session
-from database.models import Feedback, Generation, GenerationPhoto, Payment, User
+from database.models import Feedback, Generation, GenerationPhoto, Idea, Payment, User
 
 
 # Логгер
@@ -20,6 +20,46 @@ logger = structlog.get_logger()
 
 
 # ==================== USERS ====================
+
+def _is_unlimited_active(user: User, now: Optional[datetime] = None) -> bool:
+    """Проверить активен ли безлимит у пользователя."""
+    if not user.is_unlimited or not user.unlimited_until:
+        return False
+    now = now or datetime.utcnow()
+    return user.unlimited_until > now
+
+
+def _normalize_unlimited_status(user: User, now: Optional[datetime] = None) -> bool:
+    """Синхронизировать статус безлимита (сбросить если истёк)."""
+    now = now or datetime.utcnow()
+    if not user.is_unlimited:
+        return False
+
+    if not user.unlimited_until:
+        user.is_unlimited = False
+        user.balance_before_unlimited = None
+        return True
+
+    if user.unlimited_until <= now:
+        restored_balance = user.balance_before_unlimited
+        if restored_balance is not None:
+            user.balance = restored_balance
+        user.is_unlimited = False
+        user.unlimited_until = None
+        user.balance_before_unlimited = None
+        logger.info(
+            "unlimited_expired",
+            telegram_id=user.telegram_id,
+            restored_balance=user.balance,
+        )
+        return True
+
+    return False
+
+
+def is_unlimited_active(user: User) -> bool:
+    """Публичный хелпер: активен ли безлимит у пользователя."""
+    return _is_unlimited_active(user)
 
 async def get_user_by_telegram_id(telegram_id: int) -> Optional[User]:
     """
@@ -35,7 +75,10 @@ async def get_user_by_telegram_id(telegram_id: int) -> Optional[User]:
         result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
         )
-        return result.scalar_one_or_none()
+        user = result.scalar_one_or_none()
+        if user:
+            _normalize_unlimited_status(user)
+        return user
 
 
 async def get_or_create_user(
@@ -74,6 +117,10 @@ async def get_or_create_user(
                 updated = True
             if first_name and user.first_name != first_name:
                 user.first_name = first_name
+                updated = True
+
+            # Проверяем статус безлимита
+            if _normalize_unlimited_status(user):
                 updated = True
             
             if updated:
@@ -148,30 +195,45 @@ async def decrease_balance(telegram_id: int, amount: int = 1) -> bool:
     """
     async with get_session() as session:
         result = await session.execute(
-            update(User)
-            .where(
-                User.telegram_id == telegram_id,
-                User.balance >= amount,
-            )
-            .values(balance=User.balance - amount)
+            select(User).where(User.telegram_id == telegram_id)
         )
-        
-        success = result.rowcount > 0
-        
-        if success:
+        user = result.scalar_one_or_none()
+
+        if not user:
+            logger.warning(
+                "balance_decrease_failed",
+                telegram_id=telegram_id,
+                amount=amount,
+                reason="user_not_found",
+            )
+            return False
+
+        now = datetime.utcnow()
+        _normalize_unlimited_status(user, now)
+
+        if _is_unlimited_active(user, now):
             logger.info(
-                "balance_decreased",
+                "balance_decrease_skipped_unlimited",
                 telegram_id=telegram_id,
                 amount=amount,
             )
-        else:
+            return True
+
+        if user.balance < amount:
             logger.warning(
                 "balance_decrease_failed",
                 telegram_id=telegram_id,
                 amount=amount,
             )
-        
-        return success
+            return False
+
+        user.balance -= amount
+        logger.info(
+            "balance_decreased",
+            telegram_id=telegram_id,
+            amount=amount,
+        )
+        return True
 
 
 async def increase_balance(telegram_id: int, amount: int) -> bool:
@@ -187,21 +249,73 @@ async def increase_balance(telegram_id: int, amount: int) -> bool:
     """
     async with get_session() as session:
         result = await session.execute(
-            update(User)
-            .where(User.telegram_id == telegram_id)
-            .values(balance=User.balance + amount)
+            select(User).where(User.telegram_id == telegram_id)
         )
-        
-        success = result.rowcount > 0
-        
-        if success:
+        user = result.scalar_one_or_none()
+
+        if not user:
+            return False
+
+        now = datetime.utcnow()
+        _normalize_unlimited_status(user, now)
+
+        if _is_unlimited_active(user, now):
+            if user.balance_before_unlimited is None:
+                user.balance_before_unlimited = user.balance
+            user.balance_before_unlimited += amount
+
             logger.info(
-                "balance_increased",
+                "balance_increased_reserved",
                 telegram_id=telegram_id,
                 amount=amount,
+                reserved_balance=user.balance_before_unlimited,
             )
-        
-        return success
+            return True
+
+        user.balance += amount
+        logger.info(
+            "balance_increased",
+            telegram_id=telegram_id,
+            amount=amount,
+        )
+        return True
+
+
+async def activate_unlimited(telegram_id: int, duration_days: int) -> Optional[datetime]:
+    """Активировать безлимит на заданное количество дней."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == telegram_id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            return None
+
+        now = datetime.utcnow()
+        _normalize_unlimited_status(user, now)
+
+        start_from = (
+            user.unlimited_until
+            if user.unlimited_until and user.unlimited_until > now
+            else now
+        )
+        new_until = start_from + timedelta(days=duration_days)
+
+        if user.balance_before_unlimited is None:
+            user.balance_before_unlimited = user.balance
+
+        user.is_unlimited = True
+        user.unlimited_until = new_until
+
+        logger.info(
+            "unlimited_activated",
+            telegram_id=telegram_id,
+            duration_days=duration_days,
+            unlimited_until=new_until.isoformat(),
+        )
+
+        return new_until
 
 
 async def increment_total_generated(telegram_id: int) -> None:
@@ -413,52 +527,6 @@ async def update_generation_tz(
         return result.rowcount > 0
 
 
-async def update_generation_status(
-    generation_id: int,
-    status: str,
-    result_text: Optional[str] = None,
-    vision_analysis: Optional[str] = None,
-    quality_score: Optional[int] = None,
-    error_message: Optional[str] = None,
-) -> bool:
-    """
-    Обновить статус генерации.
-    
-    Args:
-        generation_id: ID генерации
-        status: Новый статус (pending, completed, failed)
-        result_text: Результат ТЗ
-        vision_analysis: Результат анализа изображений
-        quality_score: Оценка качества
-        error_message: Сообщение об ошибке
-        
-    Returns:
-        True если успешно
-    """
-    async with get_session() as session:
-        values: dict[str, object] = {"status": status}
-        
-        if result_text is not None:
-            values["tz_text"] = result_text
-        if vision_analysis is not None:
-            values["photo_analysis"] = vision_analysis
-        if quality_score is not None:
-            values["quality_score"] = quality_score
-        
-        result = await session.execute(
-            update(Generation)
-            .where(Generation.id == generation_id)
-            .values(**values)
-        )
-        
-        logger.info(
-            "generation_status_updated",
-            generation_id=generation_id,
-            status=status,
-        )
-        
-        return result.rowcount > 0
-
 
 # ==================== PAYMENTS ====================
 
@@ -619,6 +687,40 @@ async def create_feedback(
         return feedback
 
 
+# ==================== IDEAS ====================
+
+async def create_idea(
+    user_id: int,
+    text: str,
+) -> Idea:
+    """
+    Создать запись идеи от пользователя.
+    
+    Args:
+        user_id: ID пользователя в БД
+        text: Текст идеи
+    
+    Returns:
+        Созданный объект Idea
+    """
+    async with get_session() as session:
+        idea = Idea(
+            user_id=user_id,
+            text=text,
+        )
+        session.add(idea)
+        await session.flush()
+        await session.refresh(idea)
+        
+        logger.info(
+            "idea_created",
+            user_id=user_id,
+            idea_id=idea.id,
+        )
+        
+        return idea
+
+
 async def get_feedback_stats() -> dict:
     """
     Получить статистику отзывов (для админа).
@@ -689,6 +791,8 @@ async def get_user_stats(telegram_id: int) -> dict:
             "username": user.username,
             "balance": user.balance,
             "total_generated": user.total_generated,
+            "total_generations": generations_count,
+            "successful_generations": generations_count,
             "generations_count": generations_count,
             "is_premium": user.is_premium,
             "total_paid_rub": total_paid / 100,  # Конвертируем в рубли

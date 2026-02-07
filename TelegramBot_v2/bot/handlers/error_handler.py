@@ -13,6 +13,7 @@ import traceback
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Awaitable, Dict, Optional
+import html
 
 from aiogram import Bot, Router
 from aiogram.types import Update, ErrorEvent, Message, CallbackQuery
@@ -169,6 +170,10 @@ def format_admin_error_message(
     if len(traceback_preview) > 2500:
         traceback_preview = traceback_preview[-2500:] + "\n... (обрезано)"
     
+    # Экранируем HTML-символы для безопасного отображения в Telegram
+    traceback_preview = html.escape(traceback_preview)
+    exception_message = html.escape(str(exception)[:500])
+    
     message = (
         f"🚨 <b>ОШИБКА [{error_id}]</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -176,7 +181,7 @@ def format_admin_error_message(
         f"🕐 <b>Время:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"📍 <b>Контекст:</b> {context or 'N/A'}\n\n"
         f"❌ <b>Тип:</b> <code>{type(exception).__name__}</code>\n"
-        f"💬 <b>Сообщение:</b> {str(exception)[:500]}\n\n"
+        f"💬 <b>Сообщение:</b> {exception_message}\n\n"
         f"📋 <b>Traceback (последние строки):</b>\n"
         f"<pre>{traceback_preview}</pre>"
     )
@@ -383,6 +388,9 @@ async def callback_error_details(callback: CallbackQuery, bot: Bot) -> None:
     
     traceback_lines = error_details.get("traceback", [])
     traceback_str = "".join(traceback_lines) if traceback_lines else "N/A"
+    
+    # Экранируем HTML-символы для безопасного отображения в Telegram
+    traceback_str = html.escape(traceback_str)
     
     # Разбиваем длинный traceback на несколько сообщений
     max_length = 3800  # Оставляем запас для заголовков

@@ -11,8 +11,7 @@ import structlog
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.types import Message
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, desc
 
 from bot.config import settings
 from database import get_admin_stats
@@ -30,7 +29,7 @@ router = Router(name="admin_commands")
 
 def is_admin(message: Message) -> bool:
     """Проверка является ли пользователь администратором."""
-    return message.from_user.id == settings.admin_user_id
+    return message.from_user.id in settings.admin_ids
 
 
 # ============================================================
@@ -58,26 +57,25 @@ async def cmd_stats(
         stats = await get_admin_stats()
         
         # Форматируем статистику
+        total_users = stats.get('total_users', 0)
+        total_gens = stats.get('total_generations', 0)
+        avg_per_user = total_gens / total_users if total_users > 0 else 0
+
         text = (
             "📊 <b>Статистика бота</b>\n\n"
-            
+
             f"👥 <b>Пользователи:</b>\n"
-            f"   • Всего: {stats.get('total_users', 0)}\n"
-            f"   • Сегодня: {stats.get('users_today', 0)}\n"
-            f"   • Активных (7 дн): {stats.get('active_users_7d', 0)}\n\n"
-            
+            f"   • Всего: {total_users}\n"
+            f"   • Новых сегодня: {stats.get('new_users_today', 0)}\n\n"
+
             f"📝 <b>Генерации:</b>\n"
-            f"   • Всего: {stats.get('total_generations', 0)}\n"
-            f"   • Успешных: {stats.get('successful_generations', 0)}\n"
-            f"   • Сегодня: {stats.get('generations_today', 0)}\n\n"
-            
-            f"💰 <b>Платежи:</b>\n"
-            f"   • Всего: {stats.get('total_payments', 0)}\n"
-            f"   • Сумма: {stats.get('total_revenue', 0) / 100:.2f}₽\n"
-            f"   • Сегодня: {stats.get('payments_today', 0)}\n\n"
-            
+            f"   • Всего: {total_gens}\n\n"
+
+            f"💰 <b>Выручка:</b>\n"
+            f"   • Сумма: {stats.get('total_revenue_rub', 0):.2f}₽\n\n"
+
             f"📈 <b>Средние показатели:</b>\n"
-            f"   • Генераций на юзера: {stats.get('avg_generations_per_user', 0):.1f}\n"
+            f"   • Генераций на юзера: {avg_per_user:.1f}\n"
             f"   • Качество ТЗ: {stats.get('avg_quality_score', 0):.0f}/100\n"
         )
         
@@ -107,8 +105,6 @@ async def cmd_users(
         return
     
     try:
-        from sqlalchemy import select, desc
-        
         async with get_session() as sess:
             result = await sess.execute(
                 select(User)

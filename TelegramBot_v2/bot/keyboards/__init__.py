@@ -10,7 +10,7 @@
 - Админ-панель
 """
 
-from typing import Optional
+from typing import Optional, List
 
 from aiogram.types import (
     InlineKeyboardButton,
@@ -196,20 +196,22 @@ def get_photo_confirmation_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_photo_delete_keyboard(photo_count: int) -> InlineKeyboardMarkup:
+def get_photo_delete_keyboard(photo_orders: List[int]) -> InlineKeyboardMarkup:
     """
     Клавиатура выбора фото для удаления.
     
     Args:
-        photo_count: Количество загруженных фото
+        photo_orders: Список стабильных номеров загруженных фото
     """
     builder = InlineKeyboardBuilder()
     
+    orders_sorted = sorted(photo_orders)
+    
     # Кнопки с номерами фото
-    for i in range(1, photo_count + 1):
+    for order_num in orders_sorted:
         builder.button(
-            text=str(i),
-            callback_data=f"delete_photo:{i}",
+            text=str(order_num),
+            callback_data=f"delete_photo:{order_num}",
         )
     
     # Кнопка отмены
@@ -218,8 +220,18 @@ def get_photo_delete_keyboard(photo_count: int) -> InlineKeyboardMarkup:
         callback_data="back_to_confirmation",
     )
     
-    # Располагаем номера в один ряд (до 5 кнопок)
-    builder.adjust(min(photo_count, 5), 1)
+    # Располагаем номера в ряд (до 5 кнопок), затем кнопка назад
+    if orders_sorted:
+        row_size = min(len(orders_sorted), 5)
+        full_rows = len(orders_sorted) // row_size
+        remainder = len(orders_sorted) % row_size
+        rows = [row_size] * full_rows
+        if remainder:
+            rows.append(remainder)
+        rows.append(1)
+        builder.adjust(*rows)
+    else:
+        builder.adjust(1)
     return builder.as_markup()
 
 
@@ -353,10 +365,6 @@ def get_balance_keyboard() -> InlineKeyboardMarkup:
         text="💳 Пополнить баланс",
         callback_data="show_packages",
     )
-    builder.button(
-        text="📋 История покупок",
-        callback_data="payment_history",
-    )
     
     # Навигация
     builder.button(
@@ -364,7 +372,7 @@ def get_balance_keyboard() -> InlineKeyboardMarkup:
         callback_data="show_main_menu",
     )
     
-    builder.adjust(2, 1)
+    builder.adjust(1)
     return builder.as_markup()
 
 
