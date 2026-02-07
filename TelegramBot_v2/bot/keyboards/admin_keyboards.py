@@ -47,26 +47,27 @@ IDEA_STATUS_NAMES = {
 def get_admin_main_keyboard() -> InlineKeyboardMarkup:
     """Главное меню админ-панели."""
     builder = InlineKeyboardBuilder()
-    
+
     builder.row(
         InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users"),
+        InlineKeyboardButton(text="💬 Поддержка", callback_data="admin:support"),
+    )
+    builder.row(
         InlineKeyboardButton(text="📝 Генерации", callback_data="admin:generations"),
-    )
-    builder.row(
         InlineKeyboardButton(text="💳 Платежи", callback_data="admin:payments"),
+    )
+    builder.row(
         InlineKeyboardButton(text="💡 Идеи", callback_data="admin:ideas"),
-    )
-    builder.row(
         InlineKeyboardButton(text="📊 Аналитика", callback_data="admin:analytics"),
-        InlineKeyboardButton(text="🔧 Настройки", callback_data="admin:settings"),
     )
     builder.row(
+        InlineKeyboardButton(text="🔧 Настройки", callback_data="admin:settings"),
         InlineKeyboardButton(text="📋 Логи", callback_data="admin:logs"),
     )
     builder.row(
         InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:refresh"),
     )
-    
+
     return builder.as_markup()
 
 
@@ -920,5 +921,193 @@ def get_admin_actions_keyboard(
         InlineKeyboardButton(text="⬅️ Логи", callback_data="admin:logs"),
         InlineKeyboardButton(text="🏠 Меню", callback_data="admin:main"),
     )
-    
+
     return builder.as_markup()
+
+
+# ============================================================
+# ПОДДЕРЖКА
+# ============================================================
+
+def get_support_tickets_keyboard(
+    tickets: List,
+    page: int = 1,
+    total_pages: int = 1,
+    status_filter: Optional[str] = None,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура списка тикетов поддержки.
+
+    Args:
+        tickets: Список тикетов
+        page: Текущая страница
+        total_pages: Всего страниц
+        status_filter: Фильтр по статусу
+    """
+    builder = InlineKeyboardBuilder()
+
+    status_emoji = {
+        "open": "🆕",
+        "in_progress": "⏳",
+        "resolved": "✅",
+        "archived": "📁",
+    }
+
+    priority_emoji = {
+        "low": "",
+        "medium": "🟡",
+        "high": "🔴",
+    }
+
+    category_names = {
+        "payment": "💳",
+        "technical": "🔧",
+        "other": "❓",
+    }
+
+    for ticket in tickets:
+        username = ticket.user.username if ticket.user else "Без имени"
+        status = status_emoji.get(ticket.status, "❓")
+        priority = priority_emoji.get(ticket.priority, "")
+        category = category_names.get(ticket.category, "❓")
+        important = "❗" if ticket.is_important else ""
+
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{status} #{ticket.id} | @{username} {category} {priority} {important}",
+                callback_data=f"admin:support_ticket:{ticket.id}",
+            )
+        )
+
+    # Пагинация
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 1:
+            nav_buttons.append(
+                InlineKeyboardButton(text="◀️", callback_data=f"admin:support_page:{page-1}")
+            )
+        nav_buttons.append(
+            InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="admin:support_info")
+        )
+        if page < total_pages:
+            nav_buttons.append(
+                InlineKeyboardButton(text="▶️", callback_data=f"admin:support_page:{page+1}")
+            )
+
+        if nav_buttons:
+            builder.row(*nav_buttons)
+
+    # Фильтры по статусу
+    builder.row(
+        InlineKeyboardButton(
+            text="🆕 Открытые" + (" ✓" if status_filter == "open" else ""),
+            callback_data="admin:support_filter:open",
+        ),
+        InlineKeyboardButton(
+            text="⏳ В работе" + (" ✓" if status_filter == "in_progress" else ""),
+            callback_data="admin:support_filter:in_progress",
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Решённые" + (" ✓" if status_filter == "resolved" else ""),
+            callback_data="admin:support_filter:resolved",
+        ),
+        InlineKeyboardButton(
+            text="🔄 Все" + (" ✓" if status_filter is None else ""),
+            callback_data="admin:support_filter:all",
+        ),
+    )
+
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Главное меню", callback_data="admin:main"),
+    )
+
+    return builder.as_markup()
+
+
+def get_support_ticket_detail_keyboard(ticket) -> InlineKeyboardMarkup:
+    """
+    Клавиатура детального просмотра тикета.
+
+    Args:
+        ticket: Объект SupportTicket
+    """
+    builder = InlineKeyboardBuilder()
+
+    # Кнопка ответа
+    builder.row(
+        InlineKeyboardButton(
+            text="✍️ Ответить",
+            callback_data=f"admin:support_reply:{ticket.id}",
+        ),
+    )
+
+    # Управление статусом
+    if ticket.status == "open":
+        builder.row(
+            InlineKeyboardButton(
+                text="⏳ Взять в работу",
+                callback_data=f"admin:support_take:{ticket.id}",
+            ),
+        )
+    elif ticket.status == "in_progress":
+        builder.row(
+            InlineKeyboardButton(
+                text="✅ Решить",
+                callback_data=f"admin:support_resolve:{ticket.id}",
+            ),
+        )
+
+    # Важность
+    if not ticket.is_important:
+        builder.row(
+            InlineKeyboardButton(
+                text="⭐ Отметить важным",
+                callback_data=f"admin:support_important:{ticket.id}",
+            ),
+        )
+
+    # Архивирование/удаление
+    if ticket.status in ["resolved", "archived"]:
+        if ticket.status != "archived":
+            builder.row(
+                InlineKeyboardButton(
+                    text="📁 Архивировать",
+                    callback_data=f"admin:support_archive:{ticket.id}",
+                ),
+            )
+        else:
+            builder.row(
+                InlineKeyboardButton(
+                    text="🔄 Разархивировать",
+                    callback_data=f"admin:support_reopen:{ticket.id}",
+                ),
+            )
+
+    if ticket.status == "resolved":
+        builder.row(
+            InlineKeyboardButton(
+                text="🗑 Удалить",
+                callback_data=f"admin:support_delete:{ticket.id}",
+            ),
+        )
+
+    builder.row(
+        InlineKeyboardButton(text="⬅️ К списку", callback_data="admin:support"),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="admin:main"),
+    )
+
+    return builder.as_markup()
+
+
+def get_cancel_reply_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура отмены ответа."""
+    builder = InlineKeyboardBuilder()
+
+    builder.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"admin:support_ticket:{ticket_id}"),
+    )
+
+    return builder.as_markup()
+

@@ -101,6 +101,9 @@ from bot.keyboards.admin_keyboards import (
     get_user_card_keyboard,
     get_users_list_keyboard,
     get_unlimited_manage_keyboard,
+    get_support_tickets_keyboard,
+    get_support_ticket_detail_keyboard,
+    get_cancel_reply_keyboard,
 )
 from bot.states import AdminStates
 from database.admin_crud import (
@@ -129,6 +132,17 @@ from database.admin_crud import (
     get_users_paginated,
     log_admin_action,
     set_bot_setting,
+)
+from database.support_crud import (
+    get_tickets_paginated,
+    get_ticket_with_messages,
+    add_ticket_message,
+    update_ticket_status,
+    assign_ticket_admin,
+    toggle_ticket_importance,
+    archive_ticket,
+    delete_ticket,
+    get_support_stats,
 )
 
 
@@ -2436,5 +2450,398 @@ async def callback_user_generations(callback: CallbackQuery, state: FSMContext) 
     except Exception as e:
         logger.error("user_generations_error", error=str(e), telegram_id=telegram_id)
         await callback.answer("❌ Ошибка загрузки генераций", show_alert=True)
-    
+
     await callback.answer()
+
+
+# ============================================================
+# ПОДДЕРЖКА
+# ============================================================
+
+@router.callback_query(F.data == "admin:support")
+async def callback_support_section(callback: CallbackQuery) -> None:
+    """Показать раздел поддержки."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    stats = await get_support_stats()
+
+    text = f"""💬 <b>Поддержка</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+
+<b>Статистика:</b>
+📊 Всего обращений: {stats['total']}
+🆕 Открытых: {stats['by_status'].get('open', 0)}
+⏳ В работе: {stats['by_status'].get('in_progress', 0)}
+✅ Решено: {stats['by_status'].get('resolved', 0)}
+📁 Архивировано: {stats['by_status'].get('archived', 0)}
+
+❗ Важные нерешённые: {stats['important_unresolved']}
+👤 Не назначенных: {stats['unassigned']}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+Выберите обращение для работы:"""
+
+    tickets, total = await get_tickets_paginated(page=1, per_page=10)
+
+    keyboard = get_support_tickets_keyboard(tickets, page=1, total_pages=max(1, (total + 9) // 10))
+
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("admin:support_page:"))
+async def callback_support_page(callback: CallbackQuery) -> None:
+    """Пагинация тикетов поддержки."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    page = int(callback.data.split(":")[2])
+    tickets, total = await get_tickets_paginated(page=page, per_page=10)
+
+    keyboard = get_support_tickets_keyboard(tickets, page=page, total_pages=max(1, (total + 9) // 10))
+
+    await callback.message.edit_reply_markup(reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("admin:support_filter:"))
+async def callback_support_filter(callback: CallbackQuery) -> None:
+    """Фильтрация тикетов поддержки по статусу."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    status_filter = callback.data.split(":")[2]
+    if status_filter == "all":
+        status_filter = None
+
+    tickets, total = await get_tickets_paginated(page=1, per_page=10, status=status_filter)
+
+    keyboard = get_support_tickets_keyboard(
+        tickets,
+        page=1,
+        total_pages=max(1, (total + 9) // 10),
+        status_filter=status_filter,
+    )
+
+    await callback.message.edit_reply_markup(reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("admin:support_ticket:"))
+async def callback_support_ticket_detail(callback: CallbackQuery) -> None:
+    """Показать детальную информацию о тикете."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    ticket_id = int(callback.data.split(":")[2])
+    ticket = await get_ticket_with_messages(ticket_id)
+
+    if not ticket:
+        await callback.answer("Тикет не найден", show_alert=True)
+        return
+
+    # Форматируем информацию о тикете
+    category_names = {
+        "payment": "💳 Оплата",
+        "technical": "🔧 Техническая проблема",
+        "other": "❓ Другое",
+    }
+
+    status_names = {
+        "open": "🆕 Открыт",
+        "in_progress": "⏳ В работе",
+        "resolved": "✅ Решён",
+        "archived": "📁 Архивирован",
+    }
+
+    priority_names = {
+        "low": "🟢 Низкий",
+        "medium": "🟡 Средний",
+        "high": "🔴 Высокий",
+    }
+
+    text = f"""💬 <b>Обращение #{ticket.id}</b>
+
+<b>Пользователь:</b> @{ticket.user.username or 'без имени'}
+<b>Категория:</b> {category_names.get(ticket.category, ticket.category)}
+<b>Статус:</b> {status_names.get(ticket.status, ticket.status)}
+<b>Приоритет:</b> {priority_names.get(ticket.priority, ticket.priority)}
+{'❗ <b>Важное</b>' if ticket.is_important else ''}
+<b>Создано:</b> {ticket.created_at.strftime("%d.%m.%Y %H:%M")}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+<b>Сообщения:</b>"""
+
+    for msg in ticket.messages:
+        sender = "👤 Пользователь" if msg.sender_type == "user" else "👨‍💻 Ты"
+        time = msg.created_at.strftime("%d.%m %H:%M")
+        text += f"\n\n{sender} ({time}):\n{msg.text}"
+
+    if ticket.resolution_notes:
+        text += f"\n\n<b>Примечание:</b>\n{ticket.resolution_notes}"
+
+    keyboard = get_support_ticket_detail_keyboard(ticket)
+
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("admin:support_reply:"))
+async def callback_support_reply_start(callback: CallbackQuery, state: FSMContext) -> None:
+    """Начать написание ответа на тикет."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    ticket_id = int(callback.data.split(":")[2])
+
+    await state.set_state(AdminStates.writing_support_reply)
+    await state.update_data(ticket_id=ticket_id)
+
+    await callback.answer()
+    await callback.message.edit_text(
+        "✍️ <b>Напиши ответ пользователю:</b>\n\n"
+        "<i>Напиши сообщение и оно будет отправлено пользователю.</i>",
+        reply_markup=get_cancel_reply_keyboard(ticket_id),
+    )
+
+
+@router.message(AdminStates.writing_support_reply)
+async def handle_support_reply(message: Message, state: FSMContext) -> None:
+    """Обработать ответ админа на тикет."""
+    text = message.text.strip()
+
+    if len(text) > 2000:
+        await message.answer("❌ Слишком длинное сообщение (максимум 2000 символов).")
+        return
+
+    data = await state.get_data()
+    ticket_id = data.get("ticket_id")
+
+    if not ticket_id:
+        await state.clear()
+        await message.answer("❌ Ошибка сессии.")
+        return
+
+    try:
+        # Добавляем сообщение в тикет
+        msg = await add_ticket_message(
+            ticket_id=ticket_id,
+            sender_type="admin",
+            sender_telegram_id=message.from_user.id,
+            text=text,
+        )
+
+        # Обновляем статус если был open
+        ticket = await get_ticket_with_messages(ticket_id)
+        if ticket and ticket.status == "open":
+            await update_ticket_status(ticket_id, "in_progress", message.from_user.id)
+
+        # Уведомляем пользователя через бота поддержки
+        if ticket and ticket.user:
+            try:
+                from support_bot.config import support_settings
+                if support_settings.support_bot_token:
+                    from aiogram import Bot as SupportBot
+                    from aiogram.client.default import DefaultBotProperties
+                    from aiogram.enums import ParseMode
+
+                    support_bot = SupportBot(
+                        token=support_settings.support_bot_token,
+                        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+                    )
+                    try:
+                        await support_bot.send_message(
+                            chat_id=ticket.user.telegram_id,
+                            text=(
+                                f"💬 <b>Новое сообщение в обращении #{ticket_id}</b>\n\n"
+                                f"👨‍💻 <b>Поддержка:</b>\n{text}\n\n"
+                                "━━━━━━━━━━━━━━━━━━━━━\n\n"
+                                "💡 Ответить можно в этом боте."
+                            ),
+                        )
+                    finally:
+                        await support_bot.session.close()
+            except Exception as e:
+                logger.warning("failed_to_notify_user_via_support_bot", error=str(e))
+
+        await state.clear()
+
+        await message.answer(
+            "✅ Ответ отправлен пользователю!",
+        )
+
+        logger.info(
+            "admin_support_reply_sent",
+            ticket_id=ticket_id,
+            admin_id=message.from_user.id,
+        )
+
+    except Exception as e:
+        logger.error("failed_to_send_support_reply", error=str(e))
+        await message.answer("❌ Произошла ошибка при отправке.")
+
+
+@router.callback_query(F.data.startswith("admin:support_take:"))
+async def callback_support_take(callback: CallbackQuery) -> None:
+    """Взять тикет в работу."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    ticket_id = int(callback.data.split(":")[2])
+    await update_ticket_status(ticket_id, "in_progress", callback.from_user.id)
+    await assign_ticket_admin(ticket_id, callback.from_user.id)
+
+    # Перезагружаем просмотр тикета
+    ticket = await get_ticket_with_messages(ticket_id)
+    if ticket:
+        keyboard = get_support_ticket_detail_keyboard(ticket)
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+
+    logger.info("support_ticket_taken_by_admin", ticket_id=ticket_id, admin_id=callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("admin:support_resolve:"))
+async def callback_support_resolve(callback: CallbackQuery) -> None:
+    """Отметить тикет как решённый."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    ticket_id = int(callback.data.split(":")[2])
+    await update_ticket_status(ticket_id, "resolved", callback.from_user.id)
+
+    # Перезагружаем просмотр тикета
+    ticket = await get_ticket_with_messages(ticket_id)
+    if ticket:
+        keyboard = get_support_ticket_detail_keyboard(ticket)
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+
+    logger.info("support_ticket_resolved_by_admin", ticket_id=ticket_id, admin_id=callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("admin:support_important:"))
+async def callback_support_important(callback: CallbackQuery) -> None:
+    """Переключить флаг важности тикета."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    ticket_id = int(callback.data.split(":")[2])
+    is_important = await toggle_ticket_importance(ticket_id)
+
+    # Перезагружаем просмотр тикета
+    ticket = await get_ticket_with_messages(ticket_id)
+    if ticket:
+        keyboard = get_support_ticket_detail_keyboard(ticket)
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+
+    status = "важным" if is_important else "неважным"
+    logger.info("support_ticket_importance_toggled", ticket_id=ticket_id, is_important=is_important)
+
+
+@router.callback_query(F.data.startswith("admin:support_archive:"))
+async def callback_support_archive(callback: CallbackQuery) -> None:
+    """Архивировать тикет."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    ticket_id = int(callback.data.split(":")[2])
+    await archive_ticket(ticket_id)
+
+    # Перезагружаем просмотр тикета
+    ticket = await get_ticket_with_messages(ticket_id)
+    if ticket:
+        keyboard = get_support_ticket_detail_keyboard(ticket)
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+
+    logger.info("support_ticket_archived_by_admin", ticket_id=ticket_id, admin_id=callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("admin:support_reopen:"))
+async def callback_support_reopen(callback: CallbackQuery) -> None:
+    """Разархивировать тикет."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    ticket_id = int(callback.data.split(":")[2])
+    await update_ticket_status(ticket_id, "open", callback.from_user.id)
+
+    # Перезагружаем просмотр тикета
+    ticket = await get_ticket_with_messages(ticket_id)
+    if ticket:
+        keyboard = get_support_ticket_detail_keyboard(ticket)
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+
+    logger.info("support_ticket_reopened_by_admin", ticket_id=ticket_id, admin_id=callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("admin:support_delete:"))
+async def callback_support_delete(callback: CallbackQuery) -> None:
+    """Удалить тикет."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    ticket_id = int(callback.data.split(":")[2])
+
+    # Запрашиваем подтверждение
+    await callback.answer()
+
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin:support_delete_confirm:{ticket_id}"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="admin:support"),
+    )
+
+    await callback.message.edit_text(
+        f"⚠️ <b>Удалить тикет #{ticket_id}?</b>\n\n"
+        "Это действие нельзя отменить.",
+        reply_markup=builder.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:support_delete_confirm:"))
+async def callback_support_delete_confirm(callback: CallbackQuery) -> None:
+    """Подтвердить удаление тикета."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    ticket_id = int(callback.data.split(":")[2])
+    await delete_ticket(ticket_id)
+
+    await callback.message.edit_text(
+        "✅ Тикет удалён",
+        reply_markup=get_support_tickets_keyboard([], page=1, total_pages=1),
+    )
+
+    logger.info("support_ticket_deleted_by_admin", ticket_id=ticket_id, admin_id=callback.from_user.id)
+

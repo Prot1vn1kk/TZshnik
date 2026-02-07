@@ -1,295 +1,71 @@
-# 🚀 Деплой ТЗшник v2.0 на VPS
-
-## 📋 Требования к серверу
-
-### Минимальные требования:
-- **ОС**: Ubuntu 20.04+ / Debian 11+
-- **Python**: 3.10 - 3.13
-- **RAM**: 150 МБ (рекомендуется 256+ МБ)
-- **Диск**: 500 МБ
-- **CPU**: 30%+
-
-### 🎯 Рекомендуемый тариф: **CODING-2** или **CODING-3**
-
-| Тариф | RAM | Подходит? | Комментарий |
-|-------|-----|-----------|-------------|
-| CODING-1 | 100 МБ | ⚠️ Впритык | Может работать нестабильно |
-| **CODING-2** | 175 МБ | ✅ Минимум | Бот будет работать стабильно |
-| **CODING-3** | 300 МБ | ✅ Рекомендую | Запас для пиковых нагрузок |
-| CODING-4+ | 400+ МБ | ✅ Отлично | С запасом на будущее |
-
-> 💡 **Мой выбор: CODING-3 (75 RUB/мес)** - оптимальное соотношение цена/производительность
-
----
-
-## 📦 Быстрая установка (5 минут)
-
-### Шаг 1: Загрузка на сервер
-
-```bash
-# Подключаемся к серверу
-ssh user@your-server-ip
-
-# Создаём директорию
-mkdir -p ~/bots
-cd ~/bots
-
-# Загружаем проект (через Git или SCP)
-# Вариант 1 - Git:
-git clone https://github.com/your-repo/TelegramBot_v2.git
-
-# Вариант 2 - SCP (с локального компьютера):
-# scp -r TelegramBot_v2/ user@server:~/bots/
-```
-
-### Шаг 2: Запуск установки
-
-```bash
-cd ~/bots/TelegramBot_v2
-
-# Делаем скрипты исполняемыми
-chmod +x scripts/*.sh
-
-# Запускаем установку
-./scripts/install.sh
-```
-
-### Шаг 3: Настройка .env
-
-```bash
-nano .env
-```
-
-**Обязательные параметры:**
-```env
-# Токен бота от @BotFather
-TELEGRAM_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
-
-# Ваш Telegram ID (узнать: @userinfobot)
-ADMIN_USER_ID=123456789
-
-# API ключ Gemini (https://makersuite.google.com/app/apikey)
-GEMINI_API_KEY=AIzaSy...
-
-# Режим (false для production!)
-DEBUG=false
-```
-
-### Шаг 4: Тестовый запуск
-
-```bash
-# Ручной запуск для проверки
-./scripts/start.sh
-
-# Если всё работает - Ctrl+C для остановки
-```
-
-### Шаг 5: Настройка автозапуска
-
-```bash
-# Копируем systemd сервис
-sudo cp /tmp/tzshnik-bot.service /etc/systemd/system/
-
-# Перезагружаем systemd
-sudo systemctl daemon-reload
-
-# Включаем автозапуск
-sudo systemctl enable tzshnik-bot
-
-# Запускаем бота
-sudo systemctl start tzshnik-bot
-
-# Проверяем статус
-sudo systemctl status tzshnik-bot
-```
-
----
-
-## 🔧 Управление ботом
-
-### Команды systemd:
-```bash
-# Статус
-sudo systemctl status tzshnik-bot
-
-# Запуск
-sudo systemctl start tzshnik-bot
-
-# Остановка
-sudo systemctl stop tzshnik-bot
-
-# Перезапуск
-sudo systemctl restart tzshnik-bot
-
-# Логи в реальном времени
-sudo journalctl -u tzshnik-bot -f
-```
-
-### Скрипты:
-```bash
-# Статус
-./scripts/status.sh
-
-# Запуск (без systemd)
-./scripts/start.sh
-
-# Остановка
-./scripts/stop.sh
-```
-
----
-
-## 📊 Просмотр логов
-
-```bash
-# Логи бота
-tail -f ~/bots/TelegramBot_v2/logs/bot.log
-
-# Логи ошибок
-tail -f ~/bots/TelegramBot_v2/logs/error.log
-
-# Логи через systemd
-sudo journalctl -u tzshnik-bot -n 100
-
-# Логи в реальном времени
-sudo journalctl -u tzshnik-bot -f
-```
-
----
-
-## 🔄 Обновление бота
-
-```bash
-cd ~/bots/TelegramBot_v2
-
-# Остановка
-sudo systemctl stop tzshnik-bot
-
-# Обновление кода
-git pull origin main
-
-# Обновление зависимостей (если нужно)
-source venv/bin/activate
-pip install -r requirements.txt
-
-# Запуск
-sudo systemctl start tzshnik-bot
-```
-
----
-
-## ⚠️ Решение проблем
-
-### Бот не запускается
-
-```bash
-# Проверьте .env файл
-cat .env
-
-# Проверьте логи
-sudo journalctl -u tzshnik-bot -n 50
-
-# Попробуйте ручной запуск
-cd ~/bots/TelegramBot_v2
-source venv/bin/activate
-python -m bot.main
-```
-
-### Ошибка "Permission denied"
-
-```bash
-# Права на директории
-chmod -R 755 ~/bots/TelegramBot_v2
-chmod +x scripts/*.sh
-```
-
-### Ошибка памяти (OOM)
-
-Если бот убивается из-за нехватки памяти:
-
-```bash
-# Проверьте использование памяти
-free -h
-
-# Отключите swap (если нет)
-sudo fallocate -l 512M /swapfile
-sudo chmod 600 /swapfile
-sudo mkswap /swapfile
-sudo swapon /swapfile
-
-# Добавьте в автозагрузку
-echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-```
-
-### Бот зависает
-
-```bash
-# Принудительный перезапуск
-sudo systemctl kill tzshnik-bot
-sudo systemctl start tzshnik-bot
-```
-
----
-
-## 📁 Структура проекта на сервере
-
-```
-~/bots/TelegramBot_v2/
-├── .env                 # ← Конфигурация (НЕ КОММИТИТЬ!)
-├── bot/                 # Код бота
-├── core/                # AI провайдеры
-├── database/            # База данных
-├── data/
-│   └── database.sqlite  # ← SQLite база данных
-├── exports/             # PDF файлы
-├── logs/
-│   ├── bot.log          # ← Логи бота
-│   └── error.log        # ← Логи ошибок
-├── scripts/
-│   ├── install.sh       # Установка
-│   ├── start.sh         # Запуск
-│   ├── stop.sh          # Остановка
-│   └── status.sh        # Статус
-└── venv/                # Виртуальное окружение
-```
-
----
-
-## 🔒 Безопасность
-
-### Защита .env файла:
-```bash
-chmod 600 .env
-```
-
-### Файервол (если нужен):
-```bash
-# Только SSH
-sudo ufw allow ssh
-sudo ufw enable
-```
-
-### Резервное копирование:
-```bash
-# Бэкап базы данных
-cp data/database.sqlite data/database.sqlite.backup
-
-# Полный бэкап
-tar -czvf backup.tar.gz data/ .env
-```
-
----
-
-## 📞 Поддержка
-
-Если возникли проблемы:
-
-1. Проверьте логи: `sudo journalctl -u tzshnik-bot -n 100`
-2. Проверьте .env: `cat .env`
-3. Попробуйте ручной запуск: `python -m bot.main`
-4. Проверьте память: `free -h`
-5. Проверьте диск: `df -h`
-
----
-
-**Последнее обновление**: Февраль 2026
+  ✅ Бот поддержки TZshnik полностью реализован!
+
+  📁 Созданная структура:
+
+  TelegramBot_v2/
+  ├── database/
+  │   ├── models.py                    ✅ Добавлены SupportTicket, SupportMessage
+  │   └── support_crud.py               ✅ CRUD операции для тикетов
+  ├── support_bot/                      ✅ Новый бот поддержки
+  │   ├── __init__.py
+  │   ├── main.py                       ✅ Entry point
+  │   ├── config.py                     ✅ Конфигурация
+  │   ├── states.py                     ✅ FSM состояния
+  │   ├── utils.py                      ✅ Cross-bot уведомления
+  │   ├── handlers/
+  │   │   ├── __init__.py
+  │   │   ├── start.py                  ✅ /start, /help, /my_tickets
+  │   │   ├── tickets.py                ✅ Создание тикетов
+  │   │   └── messaging.py              ✅ Ответы пользователей
+  │   └── keyboards/
+  │       ├── __init__.py
+  │       └── support_keyboards.py      ✅ Клавиатуры бота поддержки
+  └── bot/
+      ├── config.py                     ✅ Добавлен support_bot_username
+      ├── states.py                     ✅ Добавлено writing_support_reply
+      ├── handlers/
+      │   └── admin_panel.py            ✅ Раздел "💬 Поддержка"
+      └── keyboards/
+          └── admin_keyboards.py        ✅ Клавиатуры поддержки
+
+  🚀 Следующие шаги:
+
+  1. Создать бота через @BotFather
+    - Создай нового бота с именем TZshnik Support Bot
+    - Получи токен
+    - Установи username: @tzshnik_support_bot (или другой)
+  2. Обновить .env файл:
+  TELEGRAM_BOT_TOKEN=твой_основной_токен
+  SUPPORT_BOT_TOKEN=твой_токен_поддержки
+  SUPPORT_BOT_USERNAME=tzshnik_support_bot
+  ADMIN_IDS_STR=603378487,другие_админы
+  3. Запустить ботов:
+  # Основной бот
+  python -m TelegramBot_v2.bot
+
+  # Бот поддержки (в отдельном терминале)
+  python -m TelegramBot_v2.support_bot
+
+  📋 Функционал:
+  ┌─────────────────────────────────────────┬───────────────────────────────┐
+  │            Для пользователей            │          Для админов          │
+  ├─────────────────────────────────────────┼───────────────────────────────┤
+  │ /start — создать обращение              │ Админ-панель → 💬 Поддержка   │
+  ├─────────────────────────────────────────┼───────────────────────────────┤
+  │ Выбор категории (Оплата/Техника/Другое) │ Список всех тикетов           │
+  ├─────────────────────────────────────────┼───────────────────────────────┤
+  │ Описание проблемы                       │ Детальный просмотр тикета     │
+  ├─────────────────────────────────────────┼───────────────────────────────┤
+  │ /my_tickets — мои обращения             │ ✍️ Ответить пользователю      │
+  ├─────────────────────────────────────────┼───────────────────────────────┤
+  │ Диалог с поддержкой                     │ ⏳ Взять в работу / ✅ Решить │
+  ├─────────────────────────────────────────┼───────────────────────────────┤
+  │                                         │ ⭐ Отметить важным            │
+  ├─────────────────────────────────────────┼───────────────────────────────┤
+  │                                         │ 📁 Архивировать / 🗑 Удалить   │
+  └─────────────────────────────────────────┴───────────────────────────────┘
+  ⚠️ Важно:
+
+  - Cross-bot уведомления требуют доработки (marked as TODO в коде)
+  - При первом запуске SQLAlchemy автоматически создаст новые таблицы
+  - Оба бота используют одну БД, поэтому данные синхронизируются

@@ -7,6 +7,8 @@ SQLAlchemy модели базы данных.
 - GenerationPhoto: фотографии для генерации
 - Payment: платежи за кредиты
 - Feedback: отзывы о качестве ТЗ
+- SupportTicket: тикеты техподдержки
+- SupportMessage: сообщения в тикетах поддержки
 """
 
 from datetime import datetime
@@ -137,6 +139,11 @@ class User(Base):
         lazy="selectin",
     )
     ideas: Mapped[List["Idea"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    support_tickets: Mapped[List["SupportTicket"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         lazy="selectin",
@@ -587,8 +594,175 @@ class BotSettings(Base):
         return f"<BotSettings(key={self.key}, value={self.value})>"
 
 
+class SupportTicket(Base):
+    """
+    Модель тикета техподдержки.
+
+    Хранит обращения пользователей в поддержку:
+    - Категория проблемы (Payment, Technical, Other)
+    - Статус (Open, In Progress, Resolved, Archived)
+    - Приоритет (Low, Medium, High)
+    - Сообщения в двухстороннем диалоге
+    - Назначенный администратор
+    - Решение проблемы (для архивированных)
+    - Флаг важности
+    """
+
+    __tablename__ = "support_tickets"
+
+    # Primary key
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    # Пользователь
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Категория проблемы
+    category: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        index=True,
+    )  # 'payment', 'technical', 'other'
+
+    # Статус тикета
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default="open",
+        nullable=False,
+        index=True,
+    )  # 'open', 'in_progress', 'resolved', 'archived'
+
+    # Приоритет
+    priority: Mapped[str] = mapped_column(
+        String(10),
+        default="medium",
+        nullable=False,
+    )  # 'low', 'medium', 'high'
+
+    # Назначенный администратор (telegram_id)
+    assigned_admin_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        nullable=True,
+        index=True,
+    )
+
+    # Флаг важности (для архивации важных тикетов)
+    is_important: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+
+    # Примечание о решении (для архивированных тикетов)
+    resolution_notes: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        nullable=True,
+    )
+
+    # Relationships
+    user: Mapped["User"] = relationship(
+        back_populates="support_tickets",
+    )
+    messages: Mapped[List["SupportMessage"]] = relationship(
+        back_populates="ticket",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="SupportMessage.created_at",
+    )
+
+    def __repr__(self) -> str:
+        return f"<SupportTicket(id={self.id}, category={self.category}, status={self.status})>"
+
+
+class SupportMessage(Base):
+    """
+    Сообщение в тикете поддержки.
+
+    Хранит сообщения от пользователя и администратора
+    в рамках тикета техподдержки.
+    """
+
+    __tablename__ = "support_messages"
+
+    # Primary key
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    # Тикет
+    ticket_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("support_tickets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Отправитель: 'user' или 'admin'
+    sender_type: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+    )  # 'user', 'admin'
+
+    # ID отправителя в Telegram
+    sender_telegram_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        index=True,
+    )
+
+    # Текст сообщения
+    text: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    # Timestamp
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        index=True,
+    )
+
+    # Relationship
+    ticket: Mapped["SupportTicket"] = relationship(
+        back_populates="messages",
+    )
+
+    def __repr__(self) -> str:
+        return f"<SupportMessage(id={self.id}, ticket_id={self.ticket_id}, sender={self.sender_type})>"
+
+
 # Дополнительные составные индексы для оптимизации запросов
 Index("ix_generations_user_created", Generation.user_id, Generation.created_at.desc())
 Index("ix_payments_user_created", Payment.user_id, Payment.created_at.desc())
 Index("ix_admin_actions_created", AdminAction.created_at.desc())
 Index("ix_ideas_status_created", Idea.status, Idea.created_at.desc())
+Index("ix_support_tickets_status_created", SupportTicket.status, SupportTicket.created_at.desc())
+Index("ix_support_tickets_user_created", SupportTicket.user_id, SupportTicket.created_at.desc())
+Index("ix_support_messages_ticket_created", SupportMessage.ticket_id, SupportMessage.created_at.desc())

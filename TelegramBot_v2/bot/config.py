@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     admin_user_id: int  # Основной админ (для обратной совместимости)
     admin_ids_str: str = ""  # Список админов через запятую: "123,456,789"
     admin_username: str = ""  # Username админа для обратной связи (без @)
+    support_bot_username: str = ""  # Username бота поддержки (без @)
     
     # ========== AI Providers ==========
     # Gemini

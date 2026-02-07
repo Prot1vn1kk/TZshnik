@@ -407,11 +407,29 @@ if __name__ == "__main__":
     # Готовим папки
     prepare_environment()
 
-    # Импортируем и запускаем бота
+    # Импортируем и запускаем ботов
     try:
-        from bot.main import main
-        logger.info("🤖 Запуск бота...")
-        asyncio.run(main())
+        from bot.main import main as main_bot
+
+        # Пытаемся импортировать бота поддержки
+        support_bot_main = None
+        try:
+            from support_bot.main import main as support_main
+            support_bot_main = support_main
+            logger.info("🤖 Запуск основного бота + бота поддержки...")
+        except ImportError as e:
+            logger.warning(f"⚠️ Бот поддержки не найден, запуск только основного: {e}")
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка инициализации бота поддержки: {e}")
+
+        async def run_all_bots():
+            """Запустить все боты конкурентно."""
+            tasks = [main_bot()]
+            if support_bot_main:
+                tasks.append(support_bot_main())
+            await asyncio.gather(*tasks)
+
+        asyncio.run(run_all_bots())
 
     except ImportError as e:
         logger.error(f"❌ Ошибка импорта: {e}")
@@ -422,7 +440,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     except KeyboardInterrupt:
-        logger.info("⛔ Бот остановлен пользователем")
+        logger.info("⛔ Боты остановлены пользователем")
 
     except Exception as e:
         logger.error(f"💥 Критическая ошибка: {e}", exc_info=True)

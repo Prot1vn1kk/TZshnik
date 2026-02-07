@@ -86,9 +86,12 @@ class AdminStates(StatesGroup):
     
     # Просмотр полного текста ТЗ
     viewing_full_tz = State()
-    
+
     # Просмотр полного анализа
     viewing_full_analysis = State()
+
+    # Написание ответа в тикете поддержки
+    writing_support_reply = State()
 
 
 class IdeaStates(StatesGroup):
