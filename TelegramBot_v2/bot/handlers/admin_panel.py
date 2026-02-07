@@ -25,12 +25,58 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.config import settings
 from config.constants import ITEMS_PER_PAGE
-from utils.validators import (
-    validate_admin_credit_operation,
-    validate_user_search,
-    validate_telegram_id,
-    format_validation_errors,
-)
+
+# Условный импорт validators для обратной совместимости
+# Если модуль недоступен (старая версия), используем встроенные проверки
+try:
+    from utils.validators import (
+        validate_admin_credit_operation,
+        validate_user_search,
+        validate_telegram_id,
+        format_validation_errors,
+    )
+    _HAS_VALIDATORS = True
+except ImportError:
+    _HAS_VALIDATORS = False
+
+    # Fallback функции для совместимости со старой версией
+    def validate_telegram_id(telegram_id: Any) -> tuple[bool, str | None]:
+        """Простая валидация Telegram ID."""
+        try:
+            tid = int(telegram_id)
+            return tid > 0 and tid <= 2_147_483_647, None
+        except (ValueError, TypeError):
+            return False, "Telegram ID должен быть числом"
+
+    def validate_user_search(query: str) -> tuple[bool, str | None, int | None]:
+        """Простая валидация поискового запроса."""
+        if not query:
+            return False, "Запрос не может быть пустым", None
+        clean = query.strip()
+        if clean.isdigit():
+            tid = int(clean)
+            if 0 < tid <= 2_147_483_647:
+                return True, None, tid
+            return False, "Некорректный Telegram ID", None
+        return True, None, None
+
+    def validate_admin_credit_operation(telegram_id: Any, amount: Any) -> tuple[bool, list[str]]:
+        """Простая валидация операции с кредитами."""
+        errors = []
+        valid, _ = validate_telegram_id(telegram_id)
+        if not valid:
+            errors.append("Некорректный Telegram ID")
+        try:
+            amt = int(amount)
+            if amt <= 0:
+                errors.append("Сумма должна быть положительной")
+        except (ValueError, TypeError):
+            errors.append("Сумма должна быть числом")
+        return len(errors) == 0, errors
+
+    def format_validation_errors(errors: list[str]) -> str:
+        """Форматирование ошибок."""
+        return "\n".join([f"❌ {e}" for e in errors]) if errors else "Нет ошибок"
 from bot.keyboards.admin_keyboards import (
     CATEGORY_NAMES,
     IDEA_STATUS_NAMES,

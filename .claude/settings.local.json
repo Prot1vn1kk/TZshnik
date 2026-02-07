@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(del \"C:\\\\Users\\\\Legit User\\\\Desktop\\\\Tzshnik2.0\\\\TelegramBot_v2\\\\bot\\\\keyboards.py\")",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git reset:*)"
+    ]
+  }
+}
