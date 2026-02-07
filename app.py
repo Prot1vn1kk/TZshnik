@@ -15,6 +15,7 @@ import sys
 import zipfile
 from io import BytesIO
 from pathlib import Path
+from typing import Optional
 
 import requests
 from packaging.version import Version
@@ -67,7 +68,7 @@ def get_releases() -> list:
         return []
 
 
-def get_latest_release(releases: list) -> dict | None:
+def get_latest_release(releases: list) -> Optional[dict]:
     """
     Найти последний релиз по semantic versioning.
 
@@ -101,7 +102,7 @@ def get_latest_release(releases: list) -> dict | None:
     return latest
 
 
-def download_release_zip(release_info: dict) -> bytes | None:
+def download_release_zip(release_info: dict) -> Optional[bytes]:
     """
     Скачать ZIP архив релиза.
 
@@ -239,7 +240,7 @@ def set_current_version(version: str) -> None:
 # ПРОВЕРКА ФАЙЛОВОЙ СИСТЕМЫ
 # ============================================================
 
-def check_filesystem_writable(path: Path | None = None) -> bool:
+def check_filesystem_writable(path: Optional[Path] = None) -> bool:
     """
     Проверить, можно ли писать в файловую систему.
 
