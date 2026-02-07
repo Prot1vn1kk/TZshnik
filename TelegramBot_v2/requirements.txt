@@ -17,6 +17,10 @@ python-dotenv>=1.0.0
 # AI Providers
 httpx>=0.25.0                # Для Gemini API
 
+# Auto-update (app.py)
+requests>=2.31.0             # Для GitHub API
+packaging>=23.0              # Для semver версий
+
 # PDF Export
 reportlab>=4.0.0             # Основная библиотека для PDF (лучшая поддержка кириллицы)
 fpdf2>=2.7.0                 # Fallback для PDF
