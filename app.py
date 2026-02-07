@@ -175,6 +175,13 @@ def install_release(content: bytes) -> bool:
                 try:
                     tg_idx = path_parts.index("TelegramBot_v2")
                     rel_path = Path(*path_parts[tg_idx + 1:])
+
+                    # Пропускаем временные и служебные файлы
+                    if any(part.startswith('.') for part in rel_path.parts):
+                        continue
+                    if rel_path.parts and rel_path.parts[0] in ('exports', 'data', '__pycache__'):
+                        continue
+
                 except ValueError:
                     # Если нет TelegramBot_v2 в пути, пропускаем файл
                     # (это могут быть файлы уровня выше, которые не нужно обновлять)
@@ -188,6 +195,10 @@ def install_release(content: bytes) -> bool:
                 # Копируем файл
                 shutil.copy2(src_file, dst_file)
                 files_count += 1
+
+                # Логируем важные файлы
+                if files_count <= 10 or 'support' in str(rel_path):
+                    logger.info(f"  + {rel_path}")
 
         logger.info(f"Обновлено {files_count} файлов")
         return True
@@ -273,7 +284,11 @@ def install_dependencies() -> bool:
         ])
 
         logger.info("✅ Зависимости успешно установлены")
-        return True
+
+        # ВАЖНО: После установки зависимостей нужно перезапустить процесс
+        # чтобы новые модули были доступны для импорта
+        logger.info("🔄 Перезапуск для применения зависимостей...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     except subprocess.CalledProcessError as e:
         logger.error(f"❌ Ошибка установки зависимостей: {e}")
