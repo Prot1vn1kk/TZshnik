@@ -11,14 +11,12 @@ import asyncio
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import zipfile
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
-
-import requests
-from packaging.version import Version
 
 # ============================================================
 # КОНФИГУРАЦИЯ
@@ -237,6 +235,53 @@ def set_current_version(version: str) -> None:
 
 
 # ============================================================
+# УСТАНОВКА ЗАВИСИМОСТЕЙ
+# ============================================================
+
+def install_dependencies() -> bool:
+    """
+    Установить зависимости из requirements.txt если их нет.
+
+    Returns:
+        True если зависимости установлены или уже были
+    """
+    requirements_file = BOT_DIR / "requirements.txt"
+
+    if not requirements_file.exists():
+        logger.warning("requirements.txt не найден, пропускаем установку")
+        return True
+
+    # Проверяем, установлены ли критичные зависимости
+    try:
+        import requests
+        import packaging
+        logger.info("✅ Критичные зависимости уже установлены")
+        return True
+    except ImportError:
+        logger.info("📦 Установка зависимостей...")
+
+    # Пытаемся установить зависимости
+    try:
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install",
+            "--upgrade", "pip"
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install",
+            "-r", str(requirements_file)
+        ])
+
+        logger.info("✅ Зависимости успешно установлены")
+        return True
+
+    except subprocess.CalledProcessError as e:
+        logger.error(f"❌ Ошибка установки зависимостей: {e}")
+        logger.error("Попробуйте установить вручную: pip install -r TelegramBot_v2/requirements.txt")
+        return False
+
+
+# ============================================================
 # ПРОВЕРКА ФАЙЛОВОЙ СИСТЕМЫ
 # ============================================================
 
@@ -283,6 +328,15 @@ def auto_update() -> bool:
         logger.warning("⚠️ Read-only файловая система, пропускаем обновление")
         return True
 
+    # Импортируем requests и packaging (могут быть не установлены)
+    try:
+        import requests
+        from packaging.version import Version as PkgVersion
+    except ImportError as e:
+        logger.warning(f"⚠️ Автообновление недоступно: {e}")
+        logger.warning("Установите зависимости: pip install requests packaging")
+        return True
+
     try:
         logger.info("🔍 Проверка обновлений через GitHub Releases...")
 
@@ -306,8 +360,8 @@ def auto_update() -> bool:
 
         # Сравниваем версии через semver
         try:
-            current_ver = Version(current)
-            latest_ver = Version(latest_tag)
+            current_ver = PkgVersion(current)
+            latest_ver = PkgVersion(latest_tag)
         except Exception as e:
             logger.warning(f"Некорректные версии: {e}")
             return True
@@ -398,6 +452,12 @@ if __name__ == "__main__":
 
     # Исправляем пути импорта
     fix_import_paths()
+
+    # Устанавливаем зависимости если их нет
+    if not install_dependencies():
+        logger.error("❌ Не удалось установить зависимости")
+        logger.error("Установите вручную: pip install -r TelegramBot_v2/requirements.txt")
+        sys.exit(1)
 
     # Проверяем и применяем обновления
     try:
