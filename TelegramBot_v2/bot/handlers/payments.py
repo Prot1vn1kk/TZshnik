@@ -33,9 +33,10 @@ from config.packages import (
     calculate_savings,
     BASE_PRICE_PER_CREDIT,
 )
-from database import increase_balance, create_payment, activate_unlimited, is_unlimited_active
+from database import increase_balance, create_payment, activate_unlimited, is_unlimited_active, get_user_by_telegram_id
 from database.models import User
 from bot.keyboards import get_main_menu_keyboard
+from bot.utils.package_menu import MIN_DAYS_LEFT_FOR_RENEWAL
 
 
 logger = structlog.get_logger()
@@ -172,54 +173,14 @@ async def callback_show_packages(
     user: User,
 ) -> None:
     """Показать профессиональное меню пакетов."""
+    from bot.utils.package_menu import build_packages_menu_text, build_packages_keyboard
+
     await callback.answer()
-    
-    # Получаем статус подписки
-    sub_status = get_subscription_status(user)
-    
-    # Формируем заголовок
-    text = (
-        "💳 <b>Пополнение баланса</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n\n"
-    )
-    
-    # Текущий баланс
-    if sub_status["is_unlimited"] and sub_status["unlimited_until"]:
-        days_left = sub_status["days_left"]
-        text += (
-            f"👑 <b>У вас активен БЕЗЛИМИТ</b>\n"
-            f"   Осталось дней: {days_left}\n\n"
-        )
-    else:
-        balance_emoji = "🟢" if user.balance >= 5 else "🟡" if user.balance > 0 else "🔴"
-        text += f"{balance_emoji} Ваш баланс: <b>{user.balance}</b> кредитов\n\n"
-    
-    # Описание пакетов по категориям
-    text += (
-        "📦 <b>Выберите пакет:</b>\n\n"
-        
-        "<b>🎯 Для старта</b>\n"
-        "   <i>Пробный • Старт • Базовый</i>\n\n"
-        
-        "<b>⭐ Популярные</b>\n"
-        "   <i>Оптимальный • Профи</i>\n\n"
-        
-        "<b>💼 Для бизнеса</b>\n"
-        "   <i>Бизнес • Корпоративный</i>\n\n"
-        
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "👑 <b>БЕЗЛИМИТ</b> — неограниченные генерации\n"
-        "   30 дней за 1 790₽ • Без лимитов!\n\n"
-        
-        "💡 <i>Чем больше пакет — тем выгоднее!</i>\n"
-    )
-    
+    text = build_packages_menu_text(user)
+    keyboard = build_packages_keyboard(user, show_back=True)
+
     if callback.message:
-        await callback.message.edit_text(
-            text=text,
-            reply_markup=build_packages_keyboard(),
-            parse_mode="HTML",
-        )
+        await callback.message.edit_text(text=text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "packages_help")
@@ -254,13 +215,65 @@ async def callback_packages_help(callback: CallbackQuery) -> None:
     
     builder = InlineKeyboardBuilder()
     builder.button(text="⬅️ К пакетам", callback_data="show_packages")
-    
+
     if callback.message:
         await callback.message.edit_text(
             text=text,
             reply_markup=builder.as_markup(),
             parse_mode="HTML",
         )
+
+
+@router.callback_query(F.data == "unlimited_info")
+async def callback_unlimited_info(callback: CallbackQuery, user: User) -> None:
+    """Показать детальную информацию о безлимите."""
+    from bot.utils.package_menu import (
+        get_unlimited_status_text,
+        build_unlimited_info_keyboard,
+    )
+
+    await callback.answer()
+
+    unlimited_status = get_unlimited_status_text(user)
+
+    if not unlimited_status["is_active"]:
+        # Если безлимит не активен, вернуть к пакетам
+        text = "⚠️ У вас нет активной безлимитной подписки"
+        if callback.message:
+            await callback.message.edit_text(text=text)
+        return
+
+    days_left = unlimited_status["days_left"]
+    until_formatted = unlimited_status["until_formatted"]
+    can_renew = unlimited_status["can_renew"]
+
+    text = (
+        "👑 <b>Информация о безлимите</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📅 <b>Действует до:</b> {until_formatted}\n"
+        f"⏳ <b>Осталось дней:</b> {days_left}\n\n"
+        "✨ <b>Что включено:</b>\n"
+        "   • Неограниченные генерации ТЗ\n"
+        "   • Приоритетная обработка\n"
+        "   • Доступ к новым функциям\n\n"
+    )
+
+    if can_renew:
+        text += (
+            f"🔄 <b>Продление доступно!</b>\n\n"
+            f"У вас осталось менее {MIN_DAYS_LEFT_FOR_RENEWAL} дней. "
+            "Вы можете продлить подписку, чтобы не прерывать доступ."
+        )
+    else:
+        text += (
+            f"⏳ <b>Продление:</b> доступно за {MIN_DAYS_LEFT_FOR_RENEWAL} дней до окончания\n\n"
+            f"Попробуйте продлить через {days_left - MIN_DAYS_LEFT_FOR_RENEWAL} дней."
+        )
+
+    keyboard = build_unlimited_info_keyboard()
+
+    if callback.message:
+        await callback.message.edit_text(text=text, reply_markup=keyboard, parse_mode="HTML")
 
 
 # ============================================================
@@ -275,24 +288,35 @@ async def callback_buy_package(
 ) -> None:
     """Показать детали пакета и запросить подтверждение."""
     await callback.answer()
-    
+
     if not callback.data or not callback.message:
         return
-    
+
     package_id = callback.data.split(":")[1]
     package = get_package(package_id)
-    
+
     if not package:
         await callback.message.edit_text("⚠️ Пакет не найден")
         return
-    
+
     user_id = callback.from_user.id if callback.from_user else 0
-    
+
     logger.info(
         "package_selected",
         user_id=user_id,
         package=package_id,
     )
+
+    # Проверка блокировки при активном безлимите
+    from bot.utils.package_menu import get_package_blocked_message, build_packages_menu_text, build_packages_keyboard
+
+    blocked_message = get_package_blocked_message(package_id, user)
+    if blocked_message:
+        # Показать сообщение о блокировке и вернуться в меню
+        keyboard = build_packages_keyboard(user, show_back=True)
+        if callback.message:
+            await callback.message.edit_text(text=blocked_message, reply_markup=keyboard, parse_mode="HTML")
+        return
     
     # Формируем детальное описание
     if package.is_unlimited:
@@ -457,10 +481,10 @@ async def callback_confirm_buy(
 # ============================================================
 
 @router.pre_checkout_query()
-async def handle_pre_checkout(pre_checkout: PreCheckoutQuery) -> None:
+async def handle_pre_checkout(pre_checkout: PreCheckoutQuery, bot: Bot) -> None:
     """
     Обработка pre_checkout_query.
-    
+
     Telegram спрашивает: "Можно проводить оплату?"
     Проверяем валидность запроса и отвечаем.
     """
@@ -470,28 +494,28 @@ async def handle_pre_checkout(pre_checkout: PreCheckoutQuery) -> None:
         total_amount=pre_checkout.total_amount,
         payload=pre_checkout.invoice_payload,
     )
-    
+
     # Валидируем payload
     try:
         parts = pre_checkout.invoice_payload.split(":")
-        
+
         if len(parts) != 3 or parts[0] != "credits":
             await pre_checkout.answer(
                 ok=False,
                 error_message="Некорректный запрос. Попробуйте заново.",
             )
             return
-        
+
         package_id = parts[1]
         package = get_package(package_id)
-        
+
         if not package:
             await pre_checkout.answer(
                 ok=False,
                 error_message="Пакет не найден. Попробуйте заново.",
             )
             return
-        
+
         # Проверяем что цена не изменилась
         if pre_checkout.total_amount != package.price_kopecks:
             await pre_checkout.answer(
@@ -499,7 +523,32 @@ async def handle_pre_checkout(pre_checkout: PreCheckoutQuery) -> None:
                 error_message="Цена изменилась. Попробуйте заново.",
             )
             return
-        
+
+        # === НОВАЯ ПРОВЕРКА: Статус безлимита ===
+        from database import get_user_by_telegram_id
+        from bot.utils.package_menu import get_unlimited_status_text
+
+        user = await get_user_by_telegram_id(pre_checkout.from_user.id)
+        if user:
+            unlimited_status = get_unlimited_status_text(user)
+
+            if unlimited_status["is_active"]:
+                # Блокируем покупку кредитов
+                if not package.is_unlimited:
+                    await pre_checkout.answer(
+                        ok=False,
+                        error_message="У вас активна безлимитная подписка! Покупка кредитов недоступна.",
+                    )
+                    return
+
+                # Блокируем раннее продление безлимита
+                if package.is_unlimited and not unlimited_status["can_renew"]:
+                    await pre_checkout.answer(
+                        ok=False,
+                        error_message=f"Продление доступно за {MIN_DAYS_LEFT_FOR_RENEWAL} дней до окончания. Осталось {unlimited_status['days_left']} дней.",
+                    )
+                    return
+
     except Exception as e:
         logger.error("pre_checkout_validation_error", error=str(e))
         await pre_checkout.answer(

@@ -938,22 +938,13 @@ async def cmd_balance(message: Message, user: User) -> None:
 
 @router.message(Command("buy"))
 async def cmd_buy(message: Message, user: User) -> None:
-    """Команда /buy - купить кредиты."""
-    from bot.keyboards import get_packages_keyboard
+    """Команда /buy - купить кредиты или подписку."""
+    from bot.utils.package_menu import build_packages_menu_text, build_packages_keyboard
 
-    await message.answer(
-        "💳 <b>Выбери пакет кредитов:</b>\n\n"
-        "🎁 <b>Пробный</b> — 3 ТЗ за 79₽\n"
-        "🔹 <b>Старт</b> — 5 ТЗ за 129₽\n"
-        "📦 <b>Базовый</b> — 10 ТЗ за 229₽\n"
-        "⭐ <b>Оптимальный</b> — 25 ТЗ за 449₽ 🔥\n"
-        "🚀 <b>Профи</b> — 50 ТЗ за 749₽\n"
-        "💼 <b>Бизнес</b> — 100 ТЗ за 1 290₽ 💎\n"
-        "🏢 <b>Корпоративный</b> — 250 ТЗ за 2 790₽\n\n"
-        "👑 <b>БЕЗЛИМИТ</b> — 1 790₽/месяц\n\n"
-        "Выбери подходящий пакет:",
-        reply_markup=get_packages_keyboard(),
-    )
+    text = build_packages_menu_text(user)
+    keyboard = build_packages_keyboard(user, show_back=False)
+
+    await message.answer(text=text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.message(Command("history"))
