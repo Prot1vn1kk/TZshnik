@@ -72,13 +72,13 @@ def clean_text_for_pdf(text: str) -> str:
 def ensure_fonts() -> bool:
     """Скачивает шрифты если нужно."""
     FONTS_DIR.mkdir(parents=True, exist_ok=True)
-    
+
     # Используем CDN для более надёжной загрузки шрифтов
     urls = {
         "DejaVuSans.ttf": "https://cdn.jsdelivr.net/npm/dejavu-fonts-ttf@2.37.3/ttf/DejaVuSans.ttf",
         "DejaVuSans-Bold.ttf": "https://cdn.jsdelivr.net/npm/dejavu-fonts-ttf@2.37.3/ttf/DejaVuSans-Bold.ttf",
     }
-    
+
     for font_name, url in urls.items():
         font_path = FONTS_DIR / font_name
         if not font_path.exists():
@@ -86,8 +86,19 @@ def ensure_fonts() -> bool:
                 logger.info(f"Downloading font {font_name}...")
                 urllib.request.urlretrieve(url, font_path)
                 logger.info(f"Font {font_name} downloaded")
-            except Exception as e:
-                logger.error(f"Failed to download {font_name}: {e}")
+            except (urllib.error.URLError, urllib.error.HTTPError) as e:
+                logger.error(
+                    f"Failed to download {font_name}",
+                    error_type="URLError",
+                    error=str(e),
+                )
+                return False
+            except OSError as e:
+                logger.error(
+                    f"Failed to save {font_name}",
+                    error_type="OSError",
+                    error=str(e),
+                )
                 return False
     return True
 
@@ -129,14 +140,14 @@ class ReportLabPDFExporter:
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
         from reportlab.lib.enums import TA_CENTER
         from reportlab.lib import colors
-        
+
         if created_at is None:
             created_at = datetime.now()
-        
+
         # Регистрируем шрифты
         font_name = "Helvetica"
         font_bold = "Helvetica-Bold"
-        
+
         if ensure_fonts():
             try:
                 if "DejaVuSans" not in pdfmetrics.getRegisteredFontNames():
@@ -144,12 +155,16 @@ class ReportLabPDFExporter:
                     pdfmetrics.registerFont(TTFont("DejaVuSans-Bold", str(FONTS_DIR / "DejaVuSans-Bold.ttf")))
                 font_name = "DejaVuSans"
                 font_bold = "DejaVuSans-Bold"
-            except Exception as e:
-                logger.error(f"Failed to register fonts: {e}")
-        
+            except (OSError, IOError) as e:
+                logger.error(
+                    "Failed to register fonts",
+                    error_type="FontError",
+                    error=str(e),
+                )
+
         # Создаём PDF в памяти
         buffer = io.BytesIO()
-        
+
         # Создаём документ
         doc = SimpleDocTemplate(
             buffer,
@@ -159,10 +174,10 @@ class ReportLabPDFExporter:
             topMargin=20*mm,
             bottomMargin=20*mm,
         )
-        
+
         # Стили
         styles = getSampleStyleSheet()
-        
+
         title_style = ParagraphStyle(
             'CustomTitle',
             parent=styles['Title'],
@@ -171,7 +186,7 @@ class ReportLabPDFExporter:
             alignment=TA_CENTER,
             spaceAfter=10,
         )
-        
+
         subtitle_style = ParagraphStyle(
             'CustomSubtitle',
             parent=styles['Normal'],
@@ -181,7 +196,7 @@ class ReportLabPDFExporter:
             textColor=colors.gray,
             spaceAfter=5,
         )
-        
+
         heading_style = ParagraphStyle(
             'CustomHeading',
             parent=styles['Heading2'],
@@ -190,7 +205,7 @@ class ReportLabPDFExporter:
             spaceBefore=15,
             spaceAfter=8,
         )
-        
+
         body_style = ParagraphStyle(
             'CustomBody',
             parent=styles['Normal'],
@@ -199,13 +214,13 @@ class ReportLabPDFExporter:
             leading=14,
             spaceAfter=3,
         )
-        
+
         bullet_style = ParagraphStyle(
             'CustomBullet',
             parent=body_style,
             leftIndent=15,
         )
-        
+
         footer_style = ParagraphStyle(
             'CustomFooter',
             parent=styles['Normal'],
@@ -214,36 +229,36 @@ class ReportLabPDFExporter:
             alignment=TA_CENTER,
             textColor=colors.gray,
         )
-        
+
         # Собираем контент
         story = []
-        
+
         # Заголовок
         category_name = CATEGORY_NAMES.get(category, category)
         story.append(Paragraph(f"Техническое задание #{generation_id}", title_style))
         story.append(Paragraph(f"Категория: {category_name}", subtitle_style))
         story.append(Paragraph(f"Дата: {created_at.strftime('%d.%m.%Y %H:%M')}", subtitle_style))
         story.append(Spacer(1, 15))
-        
+
         # Разделитель
         story.append(Paragraph("─" * 60, body_style))
         story.append(Spacer(1, 10))
-        
+
         # Очищаем текст
         clean_text = clean_text_for_pdf(tz_text)
-        
+
         # Парсим и добавляем контент
         lines = clean_text.split("\n")
         for line in lines:
             line = line.strip()
-            
+
             if not line:
                 story.append(Spacer(1, 5))
                 continue
-            
+
             # Экранируем HTML-подобные символы для Paragraph
             safe_line = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            
+
             # Определяем тип строки
             if line.startswith("━") or line.startswith("─"):
                 story.append(Paragraph("─" * 60, body_style))
@@ -256,15 +271,24 @@ class ReportLabPDFExporter:
                 story.append(Paragraph(f"• {bullet_text}", bullet_style))
             else:
                 story.append(Paragraph(safe_line, body_style))
-        
+
         # Футер
         story.append(Spacer(1, 20))
         story.append(Paragraph("─" * 60, body_style))
         story.append(Paragraph("Создано в ТЗшник — генератор ТЗ для маркетплейсов", footer_style))
-        
+
         # Генерируем PDF
-        doc.build(story)
-        
+        try:
+            doc.build(story)
+        except (ValueError, TypeError) as e:
+            logger.error(
+                "PDF build failed",
+                error_type="BuildError",
+                error=str(e),
+                generation_id=generation_id,
+            )
+            raise
+
         return buffer.getvalue()
 
 
@@ -308,8 +332,12 @@ class FPDF2Exporter:
                 pdf.add_font("DejaVu", "", str(FONTS_DIR / "DejaVuSans.ttf"))
                 pdf.add_font("DejaVu", "B", str(FONTS_DIR / "DejaVuSans-Bold.ttf"))
                 font_name = "DejaVu"
-            except Exception as e:
-                logger.error(f"Failed to load fonts: {e}")
+            except (OSError, RuntimeError) as e:
+                logger.error(
+                    "Failed to load fonts",
+                    error_type="FontLoadError",
+                    error=str(e),
+                )
         
         pdf.add_page()
         
@@ -358,8 +386,13 @@ class FPDF2Exporter:
                     pdf.multi_cell(0, 5, f"   {line}")
                 else:
                     pdf.multi_cell(0, 5, line)
-            except Exception as e:
-                logger.warning(f"Failed to render line: {e}")
+            except (ValueError, RuntimeError) as e:
+                logger.warning(
+                    "Failed to render line",
+                    error_type="RenderError",
+                    error=str(e),
+                    line_preview=line[:50],
+                )
                 continue
         
         # Футер

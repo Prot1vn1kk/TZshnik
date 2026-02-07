@@ -24,6 +24,13 @@ from aiogram.types import CallbackQuery, Message, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.config import settings
+from config.constants import ITEMS_PER_PAGE
+from utils.validators import (
+    validate_admin_credit_operation,
+    validate_user_search,
+    validate_telegram_id,
+    format_validation_errors,
+)
 from bot.keyboards.admin_keyboards import (
     CATEGORY_NAMES,
     IDEA_STATUS_NAMES,
@@ -81,9 +88,6 @@ from database.admin_crud import (
 
 logger = structlog.get_logger()
 router = Router(name="admin")
-
-# Количество элементов на странице
-ITEMS_PER_PAGE = 10
 
 
 # ============================================================
@@ -339,28 +343,34 @@ async def handle_user_search(message: Message, state: FSMContext) -> None:
     """Обработка поиска пользователя."""
     if not message.from_user or not is_admin(message.from_user.id):
         return
-    
+
     search_query = message.text.strip()
-    
+
+    # Валидируем поисковый запрос
+    valid, error, telegram_id = validate_user_search(search_query)
+    if not valid:
+        await message.answer(f"❌ {error}")
+        return
+
     try:
         users, total = await get_users_paginated(
             page=1,
             per_page=ITEMS_PER_PAGE,
             search=search_query,
         )
-        
+
         if not users:
             await message.answer(
                 f"❌ Пользователь не найден: <b>{search_query}</b>",
                 reply_markup=get_admin_back_keyboard("users"),
             )
             return
-        
+
         # Если найден один — показываем карточку
         if len(users) == 1:
             user = users[0]
             await state.clear()
-            
+
             # Показываем карточку пользователя
             info = await get_user_full_info(user.telegram_id)
             if info:
@@ -375,13 +385,13 @@ async def handle_user_search(message: Message, state: FSMContext) -> None:
                 }
                 for u in users
             ]
-            
+
             text = (
                 f"🔍 <b>Результаты поиска:</b> {search_query}\n"
                 f"Найдено: {total}\n\n"
                 f"Выберите пользователя:"
             )
-            
+
             await message.answer(
                 text,
                 reply_markup=get_users_list_keyboard(
@@ -391,9 +401,9 @@ async def handle_user_search(message: Message, state: FSMContext) -> None:
                     sort_by="created_at",
                 ),
             )
-        
+
         await state.clear()
-        
+
     except Exception as e:
         logger.error("user_search_error", error=str(e))
         await message.answer("❌ Ошибка поиска")
@@ -2187,28 +2197,24 @@ async def handle_custom_credits_input(message: Message, state: FSMContext) -> No
     """Обработка ввода произвольного количества кредитов."""
     if not message.from_user or not is_admin(message.from_user.id):
         return
-    
-    try:
-        amount = int(message.text.strip())
-        if amount <= 0:
-            await message.answer("❌ Введите положительное число.")
-            return
-        if amount > 10000:
-            await message.answer("❌ Максимум 10000 кредитов за раз.")
-            return
-    except ValueError:
-        await message.answer("❌ Введите корректное число.")
-        return
-    
+
     data = await state.get_data()
     action = data.get("credit_action", "add")
     telegram_id = data.get("target_telegram_id")
-    
+
     if not telegram_id:
         await message.answer("❌ Ошибка: пользователь не найден.")
         await state.clear()
         return
-    
+
+    # Валидируем операцию
+    valid, errors = validate_admin_credit_operation(telegram_id, message.text.strip())
+    if not valid:
+        await message.answer(format_validation_errors(errors))
+        return
+
+    amount = int(message.text.strip())
+
     try:
         if action == "add":
             success = await admin_add_credits(
@@ -2232,9 +2238,9 @@ async def handle_custom_credits_input(message: Message, state: FSMContext) -> No
                 await message.answer(f"✅ Списано {amount} кредитов у пользователя {telegram_id}")
             else:
                 await message.answer("❌ Недостаточно кредитов для списания")
-        
+
         await state.clear()
-        
+
     except Exception as e:
         logger.error("custom_credits_error", error=str(e))
         await message.answer("❌ Ошибка операции")

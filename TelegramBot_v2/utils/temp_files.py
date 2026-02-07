@@ -188,7 +188,7 @@ def save_temp_photo(
         # Сохраняем файл
         with open(file_path, "wb") as f:
             f.write(file_bytes)
-        
+
         photo = TempPhoto(
             id=photo_id,
             filename=filename,
@@ -197,7 +197,7 @@ def save_temp_photo(
             extension=extension,
             created_at=datetime.now(),
         )
-        
+
         logger.info(
             "temp_photo_saved",
             user_id=user_id,
@@ -205,16 +205,28 @@ def save_temp_photo(
             filename=filename,
             size_bytes=len(file_bytes),
         )
-        
+
         return photo, ""
-        
-    except Exception as e:
+
+    except OSError as e:
+        # Ошибка файловой системы (нет места, нет прав и т.д.)
         logger.error(
             "temp_photo_save_failed",
             user_id=user_id,
+            error_type="OSError",
+            error=str(e),
+            filename=filename,
+        )
+        return None, f"Ошибка сохранения файла: {str(e)}"
+    except (ValueError, TypeError) as e:
+        # Ошибка валидации данных
+        logger.error(
+            "temp_photo_save_failed",
+            user_id=user_id,
+            error_type="ValidationError",
             error=str(e),
         )
-        return None, f"Ошибка сохранения: {str(e)}"
+        return None, f"Ошибка валидации: {str(e)}"
 
 
 def delete_temp_photo(user_id: int, photo_id: str) -> bool:
@@ -277,18 +289,31 @@ def get_user_temp_photos(user_id: int) -> List[Path]:
 def read_temp_photo(file_path: Path) -> Optional[bytes]:
     """
     Чтение содержимого временного фото.
-    
+
     Args:
         file_path: Путь к файлу
-        
+
     Returns:
         Бинарные данные или None
     """
     try:
         with open(file_path, "rb") as f:
             return f.read()
-    except Exception as e:
-        logger.error("temp_photo_read_failed", path=str(file_path), error=str(e))
+    except OSError as e:
+        logger.error(
+            "temp_photo_read_failed",
+            path=str(file_path),
+            error_type="OSError",
+            error=str(e),
+        )
+        return None
+    except ValueError as e:
+        logger.error(
+            "temp_photo_read_failed",
+            path=str(file_path),
+            error_type="ValueError",
+            error=str(e),
+        )
         return None
 
 
@@ -341,52 +366,64 @@ def clear_user_temp_files(user_id: int) -> int:
 def cleanup_old_temp_files(max_age_hours: int = 24) -> int:
     """
     Очистка старых временных файлов всех пользователей.
-    
+
     Вызывается при запуске бота или по расписанию.
-    
+
     Args:
         max_age_hours: Максимальный возраст файлов в часах
-        
+
     Returns:
         Количество удалённых файлов
     """
     if not TEMP_FILES_DIR.exists():
         TEMP_FILES_DIR.mkdir(parents=True, exist_ok=True)
         return 0
-    
+
     count = 0
     cutoff_time = datetime.now().timestamp() - (max_age_hours * 3600)
-    
+
     try:
         for user_dir in TEMP_FILES_DIR.iterdir():
             if not user_dir.is_dir():
                 continue
-            
+
             for file_path in user_dir.iterdir():
                 try:
                     if file_path.stat().st_mtime < cutoff_time:
                         file_path.unlink()
                         count += 1
-                except Exception:
+                except OSError:
+                    # Игнорируем ошибки при удалении отдельных файлов
                     pass
-            
+
             # Удаляем пустые директории
             try:
                 if not any(user_dir.iterdir()):
                     user_dir.rmdir()
-            except Exception:
+            except OSError:
+                # Игнорируем ошибки при удалении пустых директорий
                 pass
-        
+
         if count > 0:
             logger.info(
                 "old_temp_files_cleaned",
                 files_deleted=count,
                 max_age_hours=max_age_hours,
             )
-            
-    except Exception as e:
-        logger.error("temp_files_cleanup_failed", error=str(e))
-    
+
+    except OSError as e:
+        logger.error(
+            "temp_files_cleanup_failed",
+            error_type="OSError",
+            error=str(e),
+        )
+    except ValueError as e:
+        logger.error(
+            "temp_files_cleanup_failed",
+            error_type="ValueError",
+            error=str(e),
+        )
+
     return count
 
 

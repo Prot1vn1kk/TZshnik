@@ -301,17 +301,19 @@ async def get_users_paginated(
     search: Optional[str] = None,
     sort_by: str = "created_at",
     sort_order: str = "desc",
+    load_relations: bool = False,
 ) -> Tuple[List[User], int]:
     """
     Получить список пользователей с пагинацией.
-    
+
     Args:
         page: Номер страницы (начиная с 1)
         per_page: Количество на странице
         search: Поиск по telegram_id или username
         sort_by: Поле сортировки (created_at, balance, total_generated)
         sort_order: Направление сортировки (asc, desc)
-        
+        load_relations: Загружать ли связанные данные (для избежания N+1)
+
     Returns:
         Tuple[список пользователей, общее количество]
     """
@@ -319,7 +321,14 @@ async def get_users_paginated(
         # Базовый запрос
         query = select(User)
         count_query = select(func.count(User.id))
-        
+
+        # Оптимизация: preload связанных данных для избежания N+1 запросов
+        if load_relations:
+            query = query.options(
+                selectinload(User.payments),
+                selectinload(User.generations),
+            )
+
         # Поиск
         if search:
             search_filter = or_(
@@ -328,25 +337,25 @@ async def get_users_paginated(
             )
             query = query.where(search_filter)
             count_query = count_query.where(search_filter)
-        
+
         # Сортировка
         sort_column = getattr(User, sort_by, User.created_at)
         if sort_order == "desc":
             query = query.order_by(desc(sort_column))
         else:
             query = query.order_by(sort_column)
-        
+
         # Пагинация
         offset = (page - 1) * per_page
         query = query.limit(per_page).offset(offset)
-        
+
         # Выполнение
         users_result = await session.execute(query)
         count_result = await session.execute(count_query)
-        
+
         users = list(users_result.scalars().all())
         total = count_result.scalar() or 0
-        
+
         return users, total
 
 

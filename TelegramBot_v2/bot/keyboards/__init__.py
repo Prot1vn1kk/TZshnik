@@ -43,6 +43,11 @@ from .admin_keyboards import (
     get_users_list_keyboard,
 )
 
+# Импортируем пакеты из конфига (источник истины для цен)
+from config.packages import PACKAGES as CREDIT_PACKAGES
+
+from config.constants import MAX_PHOTOS_PER_GENERATION
+
 
 # ============================================================
 # КОНСТАНТЫ
@@ -59,17 +64,9 @@ CATEGORY_BUTTONS = {
     "other": "📦 Другое",
 }
 
-# Пакеты для покупки (синхронизировано с config/packages.py)
-PACKAGES = {
-    "trial": {"name": "🎁 Пробный", "credits": 3, "price": 79},
-    "start": {"name": "🔹 Старт", "credits": 5, "price": 129},
-    "basic": {"name": "📦 Базовый", "credits": 10, "price": 229},
-    "optimal": {"name": "⭐ Оптимальный", "credits": 25, "price": 449},
-    "pro": {"name": "🚀 Профи", "credits": 50, "price": 749},
-    "business": {"name": "💼 Бизнес", "credits": 100, "price": 1290},
-    "enterprise": {"name": "🏢 Корпоративный", "credits": 250, "price": 2790},
-    "unlimited": {"name": "👑 Безлимит", "credits": -1, "price": 1790, "days": 30},
-}
+# Словарь пакетов для обратной совместимости (использует CREDIT_PACKAGES из config)
+# DEPRECATED: Используйте напрямую CREDIT_PACKAGES из config.packages
+PACKAGES = CREDIT_PACKAGES
 
 
 # ============================================================
@@ -148,19 +145,19 @@ def get_category_keyboard() -> InlineKeyboardMarkup:
 def get_photo_actions_keyboard(photo_count: int) -> InlineKeyboardMarkup:
     """
     Клавиатура действий после загрузки фото.
-    
+
     Args:
         photo_count: Текущее количество загруженных фото
     """
     builder = InlineKeyboardBuilder()
-    
+
     # Если можно загрузить ещё фото
-    if photo_count < 5:
+    if photo_count < MAX_PHOTOS_PER_GENERATION:
         builder.button(
-            text=f"📷 Добавить ещё фото ({photo_count}/5)",
+            text=f"📷 Добавить ещё фото ({photo_count}/{MAX_PHOTOS_PER_GENERATION})",
             callback_data="add_more_photos",
         )
-    
+
     builder.button(
         text="✅ Готово — проверить файлы",
         callback_data="confirm_photos",
@@ -169,7 +166,7 @@ def get_photo_actions_keyboard(photo_count: int) -> InlineKeyboardMarkup:
         text="❌ Отмена",
         callback_data="cancel",
     )
-    
+
     builder.adjust(1)
     return builder.as_markup()
 
@@ -302,46 +299,46 @@ def get_after_feedback_keyboard(generation_id: int) -> InlineKeyboardMarkup:
 def get_packages_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура выбора пакета для покупки."""
     builder = InlineKeyboardBuilder()
-    
+
     # Стартовые пакеты (3 в ряд)
     for key in ["trial", "start", "basic"]:
-        package = PACKAGES[key]
+        package = CREDIT_PACKAGES[key]
         builder.button(
-            text=f"{package['credits']} ТЗ • {package['price']}₽",
+            text=package.short_button_text,
             callback_data=f"buy:{key}",
         )
-    
+
     # Популярные пакеты (2 в ряд)
     for key in ["optimal", "pro"]:
-        package = PACKAGES[key]
+        package = CREDIT_PACKAGES[key]
         badge = "🔥 " if key == "optimal" else ""
         builder.button(
-            text=f"{badge}{package['credits']} ТЗ • {package['price']}₽",
+            text=f"{badge}{package.short_button_text}",
             callback_data=f"buy:{key}",
         )
-    
+
     # Бизнес пакеты (2 в ряд)
     for key in ["business", "enterprise"]:
-        package = PACKAGES[key]
+        package = CREDIT_PACKAGES[key]
         badge = "💎 " if key == "business" else ""
         builder.button(
-            text=f"{badge}{package['credits']} ТЗ • {package['price']}₽",
+            text=f"{badge}{package.short_button_text}",
             callback_data=f"buy:{key}",
         )
-    
+
     # Безлимитный тариф
-    unlimited = PACKAGES["unlimited"]
+    unlimited = CREDIT_PACKAGES["unlimited"]
     builder.button(
-        text=f"👑 БЕЗЛИМИТ {unlimited['days']}д • {unlimited['price']}₽",
+        text=f"👑 БЕЗЛИМИТ {unlimited.duration_days}д • {unlimited.price_rub}₽",
         callback_data="buy:unlimited",
     )
-    
+
     # Справка
     builder.button(
         text="❓ Как это работает",
         callback_data="packages_help",
     )
-    
+
     # Навигация
     builder.button(
         text="⬅️ Назад",
@@ -351,7 +348,7 @@ def get_packages_keyboard() -> InlineKeyboardMarkup:
         text="❌ Отмена",
         callback_data="cancel_payment",
     )
-    
+
     # Расположение: 3-2-2-1-1-2
     builder.adjust(3, 2, 2, 1, 1, 2)
     return builder.as_markup()
