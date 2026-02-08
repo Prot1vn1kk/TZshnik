@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import shutil
+import site
 import subprocess
 import sys
 import zipfile
@@ -283,7 +284,26 @@ def install_dependencies():
 
     deps_installed_flag = BOT_DIR / ".deps_installed"
 
-    # ПРОВАЕРЯЕМ ИМПОРТЫ ПЕРВЫМИ (всегда, даже если флаг существует)
+    # === CRITICAL FIX: Add user site-packages to sys.path BEFORE import checks ===
+    # This fixes the issue where packages are installed but not importable
+
+    # Add .local/lib path for Pterodactyl hosting
+    local_lib = Path.home() / ".local" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    if local_lib.exists() and str(local_lib) not in sys.path:
+        sys.path.insert(0, str(local_lib))
+        logger.debug(f"Добавлен путь к модулям: {local_lib}")
+
+    # Also enable user site
+    try:
+        user_site = site.getusersitepackages()
+        if user_site and user_site not in sys.path:
+            sys.path.insert(0, user_site)
+    except Exception:
+        pass
+
+    # === Now check imports with proper sys.path ===
+
+    # ПРОВЕРЯЕМ ИМПОРТЫ ПЕРВЫМИ (всегда, даже если флаг существует)
     try:
         import requests
         import packaging
@@ -299,7 +319,7 @@ def install_dependencies():
         # Модули не доступны
         pass
 
-    # Если флаг существует, но импорты не удались - удаляем флаг и пробуем снова
+    # Если флаг существует, но импорты не удались - удаляем флаг
     if deps_installed_flag.exists():
         logger.warning("⚠️ Флаг существует, но модули не доступны. Пересоздаём...")
         try:
@@ -310,10 +330,6 @@ def install_dependencies():
     # Устанавливаем зависимости
     logger.info("📦 Установка зависимостей...")
     try:
-        # НЕ обновляем pip - это может зависать на хостинге
-        # (playerok-universal не делает этого в своём updater.py)
-
-        # Устанавливаем зависимости с видимыми ошибками
         logger.info(f"📥 Установка из {requirements_file.name}...")
         subprocess.check_call([
             sys.executable, "-m", "pip", "install",
@@ -322,11 +338,24 @@ def install_dependencies():
 
         logger.info("✅ Зависимости успешно установлены")
 
-        # Перезапуск БЕЗ создания флага (флаг создастся при следующем запуске после проверки импортов)
-        logger.info("🔄 Перезапуск для применения зависимостей...")
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-        # os.execv не возвращается, но для типизации:
-        return True
+        # Create flag but DON'T restart - Pterodactyl handles deps
+        try:
+            deps_installed_flag.touch()
+        except Exception:
+            pass
+
+        # Try one more import check after installation
+        try:
+            import importlib
+            importlib.invalidate_caches()  # Clear import cache
+            import requests
+            import packaging
+            logger.info("✅ Зависимости теперь доступны")
+            return True
+        except ImportError:
+            logger.warning("⚠️ Зависимости установлены, но импорт по-прежнему не работает")
+            logger.warning("💡 Пробуем продолжить в любом случае...")
+            return True
 
     except subprocess.CalledProcessError as e:
         logger.error(f"❌ Ошибка установки зависимостей (код {e.returncode})")
