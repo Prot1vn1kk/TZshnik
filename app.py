@@ -17,7 +17,6 @@ import sys
 import zipfile
 from io import BytesIO
 from pathlib import Path
-from typing import Optional
 
 # ============================================================
 # КОНФИГУРАЦИЯ
@@ -46,7 +45,7 @@ logger = logging.getLogger("TZshnik.Updater")
 
 
 # ============================================================
-# GITHUB RELEASES API (ленивый импорт requests)
+# GITHUB RELEASES API (ленивый импорт httpx)
 # ============================================================
 
 def get_releases():
@@ -56,19 +55,33 @@ def get_releases():
     Returns:
         Список релизов в формате JSON
     """
+    # Пробуем httpx, потом requests как fallback
     try:
-        import requests
+        import httpx
     except ImportError:
-        logger.warning("requests не установлен, пропускаем проверку обновлений")
-        return []
+        try:
+            import requests
+        except ImportError:
+            logger.warning("httpx и requests не установлены, пропускаем проверку обновлений")
+            return []
 
     url = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 
     try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
+        # Используем httpx если доступен
+        try:
+            import httpx
+            with httpx.Client(timeout=30) as client:
+                response = client.get(url)
+                response.raise_for_status()
+                return response.json()
+        except ImportError:
+            # Fallback на requests
+            import requests
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            return response.json()
+    except Exception as e:
         logger.warning(f"Ошибка запроса к GitHub API: {e}")
         return []
 
@@ -83,12 +96,13 @@ def get_latest_release(releases):
     Returns:
         Последний релиз или None
     """
+    # Пробуем использовать packaging для semver
     try:
         from packaging.version import Version as PkgVersion
+        use_semver = True
     except ImportError:
-        logger.warning("packaging не установлен, используем простое сравнение")
-        # Простой fallback - берём первый релиз
-        return releases[0] if releases else None
+        use_semver = False
+        logger.info("packaging не установлен, используем строковое сравнение версий")
 
     latest = None
     latest_ver = None
@@ -102,14 +116,21 @@ def get_latest_release(releases):
         if rel.get("prerelease", False):
             continue
 
-        try:
-            ver = PkgVersion(tag_name)
-            if latest_ver is None or ver > latest_ver:
-                latest_ver = ver
+        if use_semver:
+            try:
+                ver = PkgVersion(tag_name)
+                if latest_ver is None or ver > latest_ver:
+                    latest_ver = ver
+                    latest = rel
+            except Exception:
+                # Пропускаем теги, которые не являются semver
+                continue
+        else:
+            # Простое строковое сравнение (fallback)
+            # Предполагаем что GitHub API возвращает релизы в правильном порядке
+            if latest is None:
                 latest = rel
-        except Exception:
-            # Пропускаем теги, которые не являются semver
-            continue
+                latest_ver = tag_name
 
     return latest
 
@@ -124,12 +145,6 @@ def download_release_zip(release_info):
     Returns:
         Содержимое архива в байтах или None
     """
-    try:
-        import requests
-    except ImportError:
-        logger.error("requests не установлен")
-        return None
-
     zip_url = release_info.get('zipball_url')
     if not zip_url:
         logger.error("В релизе нет URL для скачивания архива")
@@ -137,10 +152,20 @@ def download_release_zip(release_info):
 
     try:
         logger.info(f"Скачивание архива с {zip_url[:50]}...")
-        response = requests.get(zip_url, timeout=120)
-        response.raise_for_status()
-        return response.content
-    except requests.RequestException as e:
+        # Используем httpx если доступен
+        try:
+            import httpx
+            with httpx.Client(timeout=120) as client:
+                response = client.get(zip_url)
+                response.raise_for_status()
+                return response.content
+        except ImportError:
+            # Fallback на requests
+            import requests
+            response = requests.get(zip_url, timeout=120)
+            response.raise_for_status()
+            return response.content
+    except Exception as e:
         logger.error(f"Ошибка скачивания архива: {e}")
         return None
 
@@ -195,13 +220,6 @@ def install_release(content):
                 try:
                     tg_idx = path_parts.index("TelegramBot_v2")
                     rel_path = Path(*path_parts[tg_idx + 1:])
-
-                    # Пропускаем временные и служебные файлы
-                    if any(part.startswith('.') for part in rel_path.parts):
-                        continue
-                    if rel_path.parts and rel_path.parts[0] in ('exports', 'data', '__pycache__'):
-                        continue
-
                 except ValueError:
                     # Если нет TelegramBot_v2 в пути, пропускаем файл
                     # (это могут быть файлы уровня выше, которые не нужно обновлять)
@@ -305,15 +323,14 @@ def install_dependencies():
 
     # ПРОВЕРЯЕМ ИМПОРТЫ ПЕРВЫМИ (всегда, даже если флаг существует)
     try:
-        import requests
-        import packaging
+        import httpx
         # Импорты успешны - создаём флаг если его нет
         if not deps_installed_flag.exists():
             try:
                 deps_installed_flag.touch()
             except Exception:
                 pass
-        logger.info("✅ Критичные зависимости доступны")
+        logger.info("✅ Критичные зависимости доступны (httpx OK)")
         return True
     except ImportError:
         # Модули не доступны
@@ -348,8 +365,7 @@ def install_dependencies():
         try:
             import importlib
             importlib.invalidate_caches()  # Clear import cache
-            import requests
-            import packaging
+            import httpx
             logger.info("✅ Зависимости теперь доступны")
             return True
         except ImportError:
@@ -411,14 +427,23 @@ def auto_update():
         logger.warning("⚠️ Read-only файловая система, пропускаем обновление")
         return True
 
-    # Импортируем requests и packaging (могут быть не установлены)
+    # Проверяем httpx или requests
     try:
-        import requests
+        import httpx
+    except ImportError:
+        try:
+            import requests
+        except ImportError:
+            logger.warning("⚠️ Автообновление недоступно: не установлен httpx или requests")
+            logger.info("💡 Убедитесь что requirements.txt содержит httpx")
+            return True
+
+    # Пробуем импортировать packaging для semver, но не требуем его
+    try:
         from packaging.version import Version as PkgVersion
-    except ImportError as e:
-        logger.warning(f"⚠️ Автообновление недоступно: {e}")
-        logger.warning("Установите зависимости: pip install requests packaging")
-        return True
+        HAS_PACKAGING = True
+    except ImportError:
+        HAS_PACKAGING = False
 
     try:
         logger.info("🔍 Проверка обновлений через GitHub Releases...")
@@ -441,17 +466,24 @@ def auto_update():
         logger.info(f"Текущая версия: {current}")
         logger.info(f"Последняя версия: {latest_tag}")
 
-        # Сравниваем версии через semver
-        try:
-            current_ver = PkgVersion(current)
-            latest_ver = PkgVersion(latest_tag)
-        except Exception as e:
-            logger.warning(f"Некорректные версии: {e}")
-            return True
-
-        if current_ver >= latest_ver:
-            logger.info("✅ Установлена актуальная версия")
-            return True
+        # Сравниваем версии
+        if HAS_PACKAGING:
+            try:
+                current_ver = PkgVersion(current)
+                latest_ver = PkgVersion(latest_tag)
+                if current_ver >= latest_ver:
+                    logger.info("✅ Установлена актуальная версия")
+                    return True
+            except Exception as e:
+                logger.warning(f"Некорректные версии: {e}, используем простое сравнение")
+                if current == latest_tag:
+                    logger.info("✅ Установлена актуальная версия")
+                    return True
+        else:
+            # Простое строковое сравнение
+            if current == latest_tag:
+                logger.info("✅ Установлена актуальная версия")
+                return True
 
         # Доступно обновление
         logger.info(f"📦 Доступно обновление: {latest_tag}")
