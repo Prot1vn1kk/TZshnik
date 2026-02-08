@@ -3,6 +3,10 @@ TelegramBot_v2/data/temp_files/
 *.tmp
 *.temp
 
+# Auto-update flags
+TelegramBot_v2/.deps_installed
+TelegramBot_v2/.skip_update
+
 # Python
 __pycache__/
 *.pyc

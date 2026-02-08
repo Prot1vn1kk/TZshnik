@@ -310,11 +310,11 @@ def install_dependencies():
     # Устанавливаем зависимости
     logger.info("📦 Установка зависимостей...")
     try:
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install",
-            "--upgrade", "pip"
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # НЕ обновляем pip - это может зависать на хостинге
+        # (playerok-universal не делает этого в своём updater.py)
 
+        # Устанавливаем зависимости с видимыми ошибками
+        logger.info(f"📥 Установка из {requirements_file.name}...")
         subprocess.check_call([
             sys.executable, "-m", "pip", "install",
             "-r", str(requirements_file)
@@ -329,8 +329,9 @@ def install_dependencies():
         return True
 
     except subprocess.CalledProcessError as e:
-        logger.error(f"❌ Ошибка установки зависимостей: {e}")
-        logger.error("Попробуйте установить вручную: pip install -r TelegramBot_v2/requirements.txt")
+        logger.error(f"❌ Ошибка установки зависимостей (код {e.returncode})")
+        logger.error("💡 Попробуйте установить вручную:")
+        logger.error(f"   pip install -r {requirements_file}")
         return False
 
 
