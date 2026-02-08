@@ -683,6 +683,26 @@ class SupportTicket(Base):
         nullable=True,
     )
 
+    # SLA Tracking
+    first_response_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        nullable=True,
+        index=True,
+        comment="Время первого ответа администратора",
+    )
+    last_admin_response_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        nullable=True,
+        comment="Время последнего ответа администратора",
+    )
+    sla_breach: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        index=True,
+        comment="Флаг нарушения SLA (ответ > 24 часа)",
+    )
+
     # Relationships
     user: Mapped["User"] = relationship(
         back_populates="support_tickets",

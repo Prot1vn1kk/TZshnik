@@ -62,28 +62,29 @@ class PaymentStates(StatesGroup):
 class AdminStates(StatesGroup):
     """
     Состояния админ-панели.
-    
+
     Используются для ввода данных от администратора:
     - Поиск пользователей
     - Ввод количества кредитов
     - Ввод причины блокировки
+    - Работа с тикетами поддержки
     """
-    
+
     # Поиск пользователя
     searching_user = State()
-    
+
     # Ввод количества кредитов для начисления/списания
     entering_credits_amount = State()
-    
+
     # Ввод кастомного количества кредитов
     entering_custom_credits = State()
-    
+
     # Ввод причины блокировки
     entering_block_reason = State()
-    
+
     # Ввод количества бесплатных кредитов
     entering_free_credits = State()
-    
+
     # Просмотр полного текста ТЗ
     viewing_full_tz = State()
 
@@ -92,6 +93,9 @@ class AdminStates(StatesGroup):
 
     # Написание ответа в тикете поддержки
     writing_support_reply = State()
+
+    # Подтверждение отправки ответа в тикет
+    confirming_support_reply = State()
 
 
 class IdeaStates(StatesGroup):

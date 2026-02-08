@@ -843,24 +843,141 @@ async def cmd_start(
 ) -> None:
     """
     Обработчик команды /start.
-    
+
     Показывает приветствие и главное меню.
     Сбрасывает состояние FSM.
+
+    Поддерживает deep link параметры:
+    - admin_ticket_{id} — прямое открытие тикета поддержки для админа
     """
+    # Проверка на deep link параметр
+    if message.text and len(message.text) > 7:
+        args = message.text[7:]  # Убираем "/start "
+
+        # Обработка admin_ticket_{id} deep link
+        if args.startswith("admin_ticket_"):
+            try:
+                ticket_id = int(args.split("_")[-1])
+                # Импортируем проверку админа
+                from bot.handlers.admin_panel import is_admin
+
+                if is_admin(message.from_user.id):
+                    # Импортируем функции для работы с тикетами
+                    from bot.handlers.admin_panel import get_ticket_with_messages
+                    from bot.keyboards.admin_keyboards import get_support_ticket_detail_keyboard
+
+                    await state.clear()
+
+                    ticket = await get_ticket_with_messages(ticket_id)
+
+                    if not ticket:
+                        await message.answer(
+                            "❌ <b>Тикет не найден</b>\n\n"
+                            "Возможно, он был удалён или ID неверный.",
+                            reply_markup=get_start_inline_keyboard(),
+                        )
+                        logger.warning(
+                            "admin_ticket_deep_link_not_found",
+                            ticket_id=ticket_id,
+                            admin_id=message.from_user.id,
+                        )
+                        return
+
+                    # Форматируем информацию о тикете (дублируем логику из callback)
+                    category_names = {
+                        "payment": "💳 Оплата",
+                        "technical": "🔧 Техническая проблема",
+                        "other": "❓ Другое",
+                    }
+
+                    status_names = {
+                        "open": "🆕 Открыт",
+                        "in_progress": "⏳ В работе",
+                        "resolved": "✅ Решён",
+                        "archived": "📁 Архивирован",
+                    }
+
+                    priority_names = {
+                        "low": "🟢 Низкий",
+                        "medium": "🟡 Средний",
+                        "high": "🔴 Высокий",
+                    }
+
+                    text = f"""💬 <b>Обращение #{ticket.id}</b>
+
+<b>Пользователь:</b> @{ticket.user.username or 'без имени'}
+<b>Категория:</b> {category_names.get(ticket.category, ticket.category)}
+<b>Статус:</b> {status_names.get(ticket.status, ticket.status)}
+<b>Приоритет:</b> {priority_names.get(ticket.priority, ticket.priority)}
+{'❗ <b>Важное</b>' if ticket.is_important else ''}
+<b>Создано:</b> {ticket.created_at.strftime("%d.%m.%Y %H:%M")}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+<b>Сообщения:</b>"""
+
+                    for msg in ticket.messages:
+                        sender = "👤 Пользователь" if msg.sender_type == "user" else "👨‍💻 Ты"
+                        time = msg.created_at.strftime("%d.%m %H:%M")
+                        text += f"\n\n{sender} ({time}):\n{msg.text}"
+
+                    if ticket.resolution_notes:
+                        text += f"\n\n<b>Примечание:</b>\n{ticket.resolution_notes}"
+
+                    keyboard = get_support_ticket_detail_keyboard(ticket)
+
+                    await message.answer(text, reply_markup=keyboard)
+
+                    logger.info(
+                        "admin_opened_ticket_via_deep_link",
+                        ticket_id=ticket_id,
+                        admin_id=message.from_user.id,
+                    )
+                    return  # Важно: выходим, не показываем обычный стартовый экран
+                else:
+                    # Не админ пытается открыть тикет
+                    await message.answer(
+                        "⛔ <b>Доступ запрещён</b>\n\n"
+                        "Эта ссылка предназначена только для администраторов.",
+                        reply_markup=get_start_inline_keyboard(),
+                    )
+                    logger.warning(
+                        "non_admin_attempted_ticket_deep_link",
+                        ticket_id=ticket_id,
+                        user_id=message.from_user.id,
+                    )
+                    return
+            except (ValueError, IndexError):
+                # Некорректный формат deep link
+                logger.warning(
+                    "invalid_admin_ticket_deep_link_format",
+                    args=args,
+                    user_id=message.from_user.id,
+                )
+            except Exception as e:
+                # Ошибка при обработке deep link
+                logger.error(
+                    "error_processing_admin_ticket_deep_link",
+                    error=str(e),
+                    args=args,
+                    user_id=message.from_user.id,
+                )
+
+    # Стандартный flow /start без параметров
     # Сбрасываем состояние на случай если пользователь был в процессе
     await state.clear()
-    
+
     # Отправляем стартовое сообщение с inline клавиатурой
     await message.answer(
         START_MESSAGE.format(balance=get_balance_display(user)),
     )
-    
+
     # Отправляем дополнительное сообщение с inline кнопками для быстрого старта
     await message.answer(
         "👇 <b>Быстрые действия:</b>",
         reply_markup=get_start_inline_keyboard(),
     )
-    
+
     logger.info(
         "User started bot",
         telegram_id=message.from_user.id,

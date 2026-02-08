@@ -89,6 +89,11 @@ async def add_ticket_message(
     """
     Добавить сообщение в существующий тикет.
 
+    При отправке сообщения от администратора обновляет SLA метрики:
+    - first_response_at: время первого ответа админа
+    - last_admin_response_at: время последнего ответа админа
+    - sla_breach: флаг нарушения SLA (если первый ответ > 24 часов)
+
     Args:
         ticket_id: ID тикета
         sender_type: 'user' или 'admin'
@@ -99,6 +104,12 @@ async def add_ticket_message(
         Созданный объект SupportMessage
     """
     async with get_session() as session:
+        # Получаем тикет для проверки SLA
+        ticket_result = await session.execute(
+            select(SupportTicket).where(SupportTicket.id == ticket_id)
+        )
+        ticket = ticket_result.scalar_one_or_none()
+
         message = SupportMessage(
             ticket_id=ticket_id,
             sender_type=sender_type,
@@ -106,6 +117,27 @@ async def add_ticket_message(
             text=text,
         )
         session.add(message)
+
+        # Если это ответ админа, обновляем SLA метрики
+        if ticket and sender_type == "admin":
+            now = datetime.now()
+
+            # Первый ответ админа
+            if ticket.first_response_at is None:
+                ticket.first_response_at = now
+
+                # Проверяем нарушение SLA (24 часа)
+                time_since_creation = (now - ticket.created_at).total_seconds()
+                if time_since_creation > 24 * 3600:  # 24 часа в секундах
+                    ticket.sla_breach = True
+                    logger.warning(
+                        "sla_breach_detected",
+                        ticket_id=ticket_id,
+                        hours_since_creation=time_since_creation / 3600,
+                    )
+
+            # Обновляем время последнего ответа админа
+            ticket.last_admin_response_at = now
 
         await session.commit()
         await session.refresh(message)
@@ -431,6 +463,11 @@ async def get_support_stats() -> Dict[str, Any]:
     """
     Получить статистику тикетов поддержки.
 
+    Включает SLA метрики:
+    - avg_response_time: среднее время первого ответа (в часах)
+    - sla_breach_count: количество нарушений SLA
+    - sla_breach_rate: процент нарушений SLA
+
     Returns:
         Словарь со статистикой
     """
@@ -484,10 +521,36 @@ async def get_support_stats() -> Dict[str, Any]:
         )
         important = important_result.scalar() or 0
 
+        # SLA: Нарушения SLA
+        sla_breach_result = await session.execute(
+            select(func.count(SupportTicket.id))
+            .where(SupportTicket.sla_breach == True)  # noqa: E712
+        )
+        sla_breach_count = sla_breach_result.scalar() or 0
+
+        # SLA: Среднее время первого ответа (для тикетов с ответом)
+        avg_response_result = await session.execute(
+            select(
+                func.avg(
+                    func.cast(
+                        SupportTicket.first_response_at - SupportTicket.created_at,
+                        Float
+                    )
+                ) / 3600  # Конвертируем в часы
+            )
+            .where(SupportTicket.first_response_at.isnot(None))
+        )
+        avg_response_hours = avg_response_result.scalar() or 0
+
         return {
             "total": total,
             "by_status": status_counts,
             "by_category": category_counts,
             "unassigned": unassigned,
             "important_unresolved": important,
+            "sla": {
+                "breach_count": sla_breach_count,
+                "breach_rate": round(sla_breach_count / total * 100, 1) if total > 0 else 0,
+                "avg_response_hours": round(avg_response_hours, 1),
+            },
         }

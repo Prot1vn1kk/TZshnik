@@ -1111,3 +1111,43 @@ def get_cancel_reply_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
 
     return builder.as_markup()
 
+
+def get_confirm_reply_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура подтверждения отправки ответа."""
+    builder = InlineKeyboardBuilder()
+
+    builder.row(
+        InlineKeyboardButton(text="✅ Отправить", callback_data=f"admin:support_confirm_reply:{ticket_id}"),
+        InlineKeyboardButton(text="✏️ Изменить", callback_data=f"admin:support_edit_reply:{ticket_id}"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"admin:support_ticket:{ticket_id}"),
+    )
+
+    return builder.as_markup()
+
+
+def get_canned_responses_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура с шаблонами ответов."""
+    builder = InlineKeyboardBuilder()
+
+    canned_responses = [
+        ("👋 Приветствие", "hello"),
+        ("⏳ В работе", "in_progress"),
+        ("✅ Решено", "resolved"),
+        ("ℹ️ Требуется информация", "need_info"),
+        ("🙏 Спасибо за обращение", "thanks"),
+        ("🔄 Передано в отдел", "forwarded"),
+    ]
+
+    for text, key in canned_responses:
+        builder.row(
+            InlineKeyboardButton(text=text, callback_data=f"admin:support_canned:{ticket_id}:{key}"),
+        )
+
+    builder.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"admin:support_ticket:{ticket_id}"),
+    )
+
+    return builder.as_markup()
+

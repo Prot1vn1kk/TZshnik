@@ -190,27 +190,35 @@ async def on_startup(bot: Bot) -> None:
 async def on_shutdown(bot: Bot) -> None:
     """
     Callback при остановке бота.
-    
+
     Выполняется при graceful shutdown:
     - Останавливает backup scheduler
+    - Закрывает сессию support бота
     - Логирует остановку
     - Закрывает сессии
-    
+
     Args:
         bot: Экземпляр бота
     """
     logger.info("bot_stopping")
-    
+
     # Остановка планировщика бэкапов
     try:
         from utils.backup import backup_scheduler
         await backup_scheduler.stop()
     except Exception as e:
         logger.warning("failed_to_stop_backup_scheduler", error=str(e))
-    
+
+    # Закрытие сессии бота поддержки
+    try:
+        from bot.utils.support_bot import close_support_bot
+        await close_support_bot()
+    except Exception as e:
+        logger.warning("failed_to_close_support_bot", error=str(e))
+
     # Закрытие соединения с БД
     await close_db()
-    
+
     await bot.session.close()
     logger.info("bot_stopped")
 

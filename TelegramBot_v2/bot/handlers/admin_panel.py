@@ -104,6 +104,8 @@ from bot.keyboards.admin_keyboards import (
     get_support_tickets_keyboard,
     get_support_ticket_detail_keyboard,
     get_cancel_reply_keyboard,
+    get_confirm_reply_keyboard,
+    get_canned_responses_keyboard,
 )
 from bot.states import AdminStates
 from database.admin_crud import (
@@ -2669,14 +2671,15 @@ async def callback_support_reply_start(callback: CallbackQuery, state: FSMContex
     await callback.answer()
     await callback.message.edit_text(
         "✍️ <b>Напиши ответ пользователю:</b>\n\n"
-        "<i>Напиши сообщение и оно будет отправлено пользователю.</i>",
-        reply_markup=get_cancel_reply_keyboard(ticket_id),
+        "<i>Напиши сообщение и оно будет отправлено пользователю.</i>\n\n"
+        "💡 Или выбери шаблон готового ответа:",
+        reply_markup=get_canned_responses_keyboard(ticket_id),
     )
 
 
 @router.message(AdminStates.writing_support_reply)
 async def handle_support_reply(message: Message, state: FSMContext) -> None:
-    """Обработать ответ админа на тикет."""
+    """Обработать ответ админа на тикет - показать preview."""
     if not _HAS_SUPPORT_CRUD:
         await state.clear()
         await message.answer("⚠️ Модуль техподдержки недоступен")
@@ -2688,6 +2691,10 @@ async def handle_support_reply(message: Message, state: FSMContext) -> None:
         await message.answer("❌ Слишком длинное сообщение (максимум 2000 символов).")
         return
 
+    if len(text) < 2:
+        await message.answer("❌ Слишком короткое сообщение (минимум 2 символа).")
+        return
+
     data = await state.get_data()
     ticket_id = data.get("ticket_id")
 
@@ -2696,63 +2703,203 @@ async def handle_support_reply(message: Message, state: FSMContext) -> None:
         await message.answer("❌ Ошибка сессии.")
         return
 
+    # Сохраняем текст ответа в состояние
+    await state.update_data(reply_text=text)
+    await state.set_state(AdminStates.confirming_support_reply)
+
+    # Показываем preview
+    preview_text = f"""📋 <b>Предпросмотр ответа</b> #{ticket_id}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+👨‍💻 <b>Твой ответ:</b>
+{text}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+<i>Отправить этот ответ пользователю?</i>"""
+
+    await message.answer(
+        preview_text,
+        reply_markup=get_confirm_reply_keyboard(ticket_id),
+    )
+
+    logger.info(
+        "admin_support_reply_preview",
+        ticket_id=ticket_id,
+        admin_id=message.from_user.id,
+        text_length=len(text),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:support_confirm_reply:"))
+async def callback_support_confirm_reply(callback: CallbackQuery, state: FSMContext) -> None:
+    """Подтвердить и отправить ответ пользователю."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Модуль техподдержки недоступен", show_alert=True)
+        return
+
+    ticket_id = int(callback.data.split(":")[2])
+
+    # Получаем текст ответа из состояния
+    data = await state.get_data()
+    text = data.get("reply_text", "")
+
+    if not text:
+        await callback.answer("❌ Ошибка: текст ответа не найден", show_alert=True)
+        await state.clear()
+        return
+
     try:
         # Добавляем сообщение в тикет
         msg = await add_ticket_message(
             ticket_id=ticket_id,
             sender_type="admin",
-            sender_telegram_id=message.from_user.id,
+            sender_telegram_id=callback.from_user.id,
             text=text,
         )
 
         # Обновляем статус если был open
         ticket = await get_ticket_with_messages(ticket_id)
         if ticket and ticket.status == "open":
-            await update_ticket_status(ticket_id, "in_progress", message.from_user.id)
+            await update_ticket_status(ticket_id, "in_progress", callback.from_user.id)
 
         # Уведомляем пользователя через бота поддержки
         if ticket and ticket.user:
             try:
-                from support_bot.config import support_settings
-                if support_settings.support_bot_token:
-                    from aiogram import Bot as SupportBot
-                    from aiogram.client.default import DefaultBotProperties
-                    from aiogram.enums import ParseMode
+                from bot.utils.support_bot import notify_user_via_support_bot
 
-                    support_bot = SupportBot(
-                        token=support_settings.support_bot_token,
-                        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-                    )
-                    try:
-                        await support_bot.send_message(
-                            chat_id=ticket.user.telegram_id,
-                            text=(
-                                f"💬 <b>Новое сообщение в обращении #{ticket_id}</b>\n\n"
-                                f"👨‍💻 <b>Поддержка:</b>\n{text}\n\n"
-                                "━━━━━━━━━━━━━━━━━━━━━\n\n"
-                                "💡 Ответить можно в этом боте."
-                            ),
-                        )
-                    finally:
-                        await support_bot.session.close()
+                notification_text = (
+                    f"💬 <b>Новое сообщение в обращении #{ticket_id}</b>\n\n"
+                    f"👨‍💻 <b>Поддержка:</b>\n{text}\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "💡 Ответить можно в этом боте."
+                )
+
+                await notify_user_via_support_bot(
+                    telegram_id=ticket.user.telegram_id,
+                    text=notification_text,
+                )
             except Exception as e:
                 logger.warning("failed_to_notify_user_via_support_bot", error=str(e))
 
         await state.clear()
 
-        await message.answer(
+        await callback.answer()
+        await callback.message.edit_text(
             "✅ Ответ отправлен пользователю!",
         )
 
         logger.info(
             "admin_support_reply_sent",
             ticket_id=ticket_id,
-            admin_id=message.from_user.id,
+            admin_id=callback.from_user.id,
         )
 
     except Exception as e:
         logger.error("failed_to_send_support_reply", error=str(e))
-        await message.answer("❌ Произошла ошибка при отправке.")
+        await callback.answer("❌ Произошла ошибка при отправке.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin:support_edit_reply:"))
+async def callback_support_edit_reply(callback: CallbackQuery, state: FSMContext) -> None:
+    """Вернуться к редактированию ответа."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    ticket_id = int(callback.data.split(":")[2])
+
+    # Возвращаемся в состояние написания
+    await state.set_state(AdminStates.writing_support_reply)
+
+    await callback.answer()
+    await callback.message.edit_text(
+        "✍️ <b>Напиши ответ пользователю:</b>\n\n"
+        "<i>Отправь новое сообщение для замены предыдущего.</i>",
+        reply_markup=get_canned_responses_keyboard(ticket_id),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:support_canned:"))
+async def callback_support_canned_response(callback: CallbackQuery, state: FSMContext) -> None:
+    """Использовать шаблон ответа."""
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    ticket_id = int(parts[2])
+    canned_key = parts[3]
+
+    # Шаблоны ответов
+    canned_responses = {
+        "hello": (
+            "👋 Здравствуйте!\n\n"
+            "Спасибо за ваше обращение. Мы уже изучаем вопрос и скоро дадим ответ."
+        ),
+        "in_progress": (
+            "⏳ Ваше обращение в работе.\n\n"
+            "Мы занимаемся решением проблемы. Оповестим вас как только будет результат."
+        ),
+        "resolved": (
+            "✅ Ваше обращение решено!\n\n"
+            "Если у вас возникнут еще вопросы или проблемы, обязательно напишите нам."
+        ),
+        "need_info": (
+            "ℹ️ Для решения вопроса нам нужна дополнительная информация.\n\n"
+            "Пожалуйста, уточните:\n"
+            "• Какое действие вы выполняли?\n"
+            "• В какое время это произошло?\n"
+            "• Какой результат вы ожидали?"
+        ),
+        "thanks": (
+            "🙏 Спасибо за ваше обращение!\n\n"
+            "Мы ценим вашу обратную связь. Если есть ещё вопросы — пишите!"
+        ),
+        "forwarded": (
+            "🔄 Ваше обращение передано в соответствующий отдел.\n\n"
+            "Специалисты займутся им в ближайшее время."
+        ),
+    }
+
+    text = canned_responses.get(canned_key, "")
+
+    if not text:
+        await callback.answer("❌ Шаблон не найден", show_alert=True)
+        return
+
+    # Сохраняем текст и показываем preview
+    await state.update_data(reply_text=text)
+    await state.set_state(AdminStates.confirming_support_reply)
+
+    await callback.answer()
+
+    preview_text = f"""📋 <b>Предпросмотр ответа</b> #{ticket_id}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+👨‍💻 <b>Шаблон:</b>
+{text}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+<i>Отправить этот ответ или изменить?</i>"""
+
+    await callback.message.edit_text(
+        preview_text,
+        reply_markup=get_confirm_reply_keyboard(ticket_id),
+    )
+
+    logger.info(
+        "admin_used_canned_response",
+        ticket_id=ticket_id,
+        admin_id=callback.from_user.id,
+        canned_key=canned_key,
+    )
 
 
 @router.callback_query(F.data.startswith("admin:support_take:"))
