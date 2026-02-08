@@ -185,7 +185,9 @@ async def main() -> None:
     logger.info("support_bot_middleware_registered")
 
     # Регистрация глобального обработчика ошибок
-    from bot.handlers.error_handler import router as error_router
+    # Создаём отдельный экземпляр роутера для бота поддержки
+    from bot.handlers.error_handler import get_error_router
+    error_router = get_error_router()
     dp.include_router(error_router)
 
     # Регистрация роутеров бота поддержки
