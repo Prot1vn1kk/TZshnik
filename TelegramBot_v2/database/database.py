@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Dict, Any
 
 import structlog
-from sqlalchemy import event, text
+from sqlalchemy import event, text, inspect
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -145,6 +145,53 @@ db_stats = DatabaseStats()
 SLOW_QUERY_THRESHOLD_MS = 100.0
 
 
+async def migrate_database() -> None:
+    """
+    Run database migrations to add missing columns.
+
+    Checks for missing columns in support_tickets table and adds them.
+    """
+    async with engine.begin() as conn:
+        inspector = inspect(conn)
+
+        # Check if support_tickets table exists
+        tables = await conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='support_tickets'")
+        )
+
+        if tables.fetchone():
+            # Table exists, check for missing columns
+            columns = await conn.execute(
+                text("PRAGMA table_info(support_tickets)")
+            )
+            existing_columns = {row[1] for row in columns.fetchall()}
+
+            required_columns = [
+                ("first_response_at", "DATETIME"),
+                ("last_admin_response_at", "DATETIME"),
+                ("sla_breach", "BOOLEAN"),
+            ]
+
+            for col_name, col_type in required_columns:
+                if col_name not in existing_columns:
+                    logger.info(f"Adding column: support_tickets.{col_name}")
+                    await conn.execute(text(
+                        f"ALTER TABLE support_tickets ADD COLUMN {col_name} {col_type}"
+                    ))
+
+            # Create indexes for new columns
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_support_tickets_first_response_at "
+                "ON support_tickets(first_response_at)"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_support_tickets_sla_breach "
+                "ON support_tickets(sla_breach)"
+            ))
+
+            logger.info("support_tickets table migrated successfully")
+
+
 async def init_db() -> None:
     """
     Инициализация базы данных.
@@ -154,13 +201,17 @@ async def init_db() -> None:
     """
     # Импорт здесь чтобы избежать circular import
     from database.models import Base
-    
+
     # Создаём директорию для БД
     settings.data_dir.mkdir(exist_ok=True)
-    
+
+    # Run migrations to update existing tables
+    await migrate_database()
+
+    # Then create any remaining tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    
+
     logger.info("database_initialized", url=settings.database_url)
 
 
