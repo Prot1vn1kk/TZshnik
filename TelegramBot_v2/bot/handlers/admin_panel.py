@@ -133,17 +133,56 @@ from database.admin_crud import (
     log_admin_action,
     set_bot_setting,
 )
-from database.support_crud import (
-    get_tickets_paginated,
-    get_ticket_with_messages,
-    add_ticket_message,
-    update_ticket_status,
-    assign_ticket_admin,
-    toggle_ticket_importance,
-    archive_ticket,
-    delete_ticket,
-    get_support_stats,
-)
+# Условный импорт support_crud (техподдержка - опциональный модуль)
+# Если модуль недоступен, используем stub-функции
+try:
+    from database.support_crud import (
+        get_tickets_paginated,
+        get_ticket_with_messages,
+        add_ticket_message,
+        update_ticket_status,
+        assign_ticket_admin,
+        toggle_ticket_importance,
+        archive_ticket,
+        delete_ticket,
+        get_support_stats,
+    )
+    _HAS_SUPPORT_CRUD = True
+except ImportError:
+    _HAS_SUPPORT_CRUD = False
+
+    # Stub-функции для совместимости без модуля support_crud
+    async def get_tickets_paginated(*args, **kwargs):
+        return [], 0
+
+    async def get_ticket_with_messages(*args, **kwargs):
+        return None
+
+    async def add_ticket_message(*args, **kwargs):
+        return False
+
+    async def update_ticket_status(*args, **kwargs):
+        return False
+
+    async def assign_ticket_admin(*args, **kwargs):
+        return False
+
+    async def toggle_ticket_importance(*args, **kwargs):
+        return False
+
+    async def archive_ticket(*args, **kwargs):
+        return False
+
+    async def delete_ticket(*args, **kwargs):
+        return False
+
+    async def get_support_stats(*args, **kwargs):
+        return {
+            "total_tickets": 0,
+            "open_tickets": 0,
+            "closed_tickets": 0,
+            "avg_response_time": 0,
+        }
 
 
 logger = structlog.get_logger()
@@ -2465,6 +2504,11 @@ async def callback_support_section(callback: CallbackQuery) -> None:
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
 
+    # Проверка доступности модуля поддержки
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Модуль техподдержки недоступен", show_alert=True)
+        return
+
     await callback.answer()
 
     stats = await get_support_stats()
@@ -2500,6 +2544,9 @@ async def callback_support_page(callback: CallbackQuery) -> None:
     if not callback.from_user or not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Модуль техподдержки недоступен", show_alert=True)
+        return
 
     await callback.answer()
 
@@ -2516,6 +2563,9 @@ async def callback_support_filter(callback: CallbackQuery) -> None:
     """Фильтрация тикетов поддержки по статусу."""
     if not callback.from_user or not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Модуль техподдержки недоступен", show_alert=True)
         return
 
     await callback.answer()
@@ -2541,6 +2591,9 @@ async def callback_support_ticket_detail(callback: CallbackQuery) -> None:
     """Показать детальную информацию о тикете."""
     if not callback.from_user or not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Модуль техподдержки недоступен", show_alert=True)
         return
 
     await callback.answer()
@@ -2604,6 +2657,9 @@ async def callback_support_reply_start(callback: CallbackQuery, state: FSMContex
     if not callback.from_user or not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Модуль техподдержки недоступен", show_alert=True)
+        return
 
     ticket_id = int(callback.data.split(":")[2])
 
@@ -2621,6 +2677,11 @@ async def callback_support_reply_start(callback: CallbackQuery, state: FSMContex
 @router.message(AdminStates.writing_support_reply)
 async def handle_support_reply(message: Message, state: FSMContext) -> None:
     """Обработать ответ админа на тикет."""
+    if not _HAS_SUPPORT_CRUD:
+        await state.clear()
+        await message.answer("⚠️ Модуль техподдержки недоступен")
+        return
+
     text = message.text.strip()
 
     if len(text) > 2000:
@@ -2700,6 +2761,9 @@ async def callback_support_take(callback: CallbackQuery) -> None:
     if not callback.from_user or not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Модуль техподдержки недоступен", show_alert=True)
+        return
 
     await callback.answer()
 
@@ -2722,6 +2786,9 @@ async def callback_support_resolve(callback: CallbackQuery) -> None:
     if not callback.from_user or not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Модуль техподдержки недоступен", show_alert=True)
+        return
 
     await callback.answer()
 
@@ -2742,6 +2809,9 @@ async def callback_support_important(callback: CallbackQuery) -> None:
     """Переключить флаг важности тикета."""
     if not callback.from_user or not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Модуль техподдержки недоступен", show_alert=True)
         return
 
     await callback.answer()
@@ -2765,6 +2835,9 @@ async def callback_support_archive(callback: CallbackQuery) -> None:
     if not callback.from_user or not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Модуль техподдержки недоступен", show_alert=True)
+        return
 
     await callback.answer()
 
@@ -2786,6 +2859,9 @@ async def callback_support_reopen(callback: CallbackQuery) -> None:
     if not callback.from_user or not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Модуль техподдержки недоступен", show_alert=True)
+        return
 
     await callback.answer()
 
@@ -2806,6 +2882,9 @@ async def callback_support_delete(callback: CallbackQuery) -> None:
     """Удалить тикет."""
     if not callback.from_user or not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Модуль техподдержки недоступен", show_alert=True)
         return
 
     ticket_id = int(callback.data.split(":")[2])
@@ -2831,6 +2910,9 @@ async def callback_support_delete_confirm(callback: CallbackQuery) -> None:
     """Подтвердить удаление тикета."""
     if not callback.from_user or not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Модуль техподдержки недоступен", show_alert=True)
         return
 
     await callback.answer()

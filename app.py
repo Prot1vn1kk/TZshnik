@@ -45,16 +45,22 @@ logger = logging.getLogger("TZshnik.Updater")
 
 
 # ============================================================
-# GITHUB RELEASES API
+# GITHUB RELEASES API (ленивый импорт requests)
 # ============================================================
 
-def get_releases() -> list:
+def get_releases():
     """
     Получить все релизы с GitHub.
 
     Returns:
         Список релизов в формате JSON
     """
+    try:
+        import requests
+    except ImportError:
+        logger.warning("requests не установлен, пропускаем проверку обновлений")
+        return []
+
     url = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 
     try:
@@ -66,7 +72,7 @@ def get_releases() -> list:
         return []
 
 
-def get_latest_release(releases: list) -> Optional[dict]:
+def get_latest_release(releases):
     """
     Найти последний релиз по semantic versioning.
 
@@ -76,6 +82,13 @@ def get_latest_release(releases: list) -> Optional[dict]:
     Returns:
         Последний релиз или None
     """
+    try:
+        from packaging.version import Version as PkgVersion
+    except ImportError:
+        logger.warning("packaging не установлен, используем простое сравнение")
+        # Простой fallback - берём первый релиз
+        return releases[0] if releases else None
+
     latest = None
     latest_ver = None
 
@@ -89,7 +102,7 @@ def get_latest_release(releases: list) -> Optional[dict]:
             continue
 
         try:
-            ver = Version(tag_name)
+            ver = PkgVersion(tag_name)
             if latest_ver is None or ver > latest_ver:
                 latest_ver = ver
                 latest = rel
@@ -100,7 +113,7 @@ def get_latest_release(releases: list) -> Optional[dict]:
     return latest
 
 
-def download_release_zip(release_info: dict) -> Optional[bytes]:
+def download_release_zip(release_info):
     """
     Скачать ZIP архив релиза.
 
@@ -110,6 +123,12 @@ def download_release_zip(release_info: dict) -> Optional[bytes]:
     Returns:
         Содержимое архива в байтах или None
     """
+    try:
+        import requests
+    except ImportError:
+        logger.error("requests не установлен")
+        return None
+
     zip_url = release_info.get('zipball_url')
     if not zip_url:
         logger.error("В релизе нет URL для скачивания архива")
@@ -125,7 +144,7 @@ def download_release_zip(release_info: dict) -> Optional[bytes]:
         return None
 
 
-def install_release(content: bytes) -> bool:
+def install_release(content):
     """
     Распаковать и установить все файлы из архива обновления.
 
@@ -217,7 +236,7 @@ def install_release(content: bytes) -> bool:
 # УПРАВЛЕНИЕ ВЕРСИЯМИ
 # ============================================================
 
-def get_current_version() -> str:
+def get_current_version():
     """
     Получить текущую версию из файла.
 
@@ -232,7 +251,7 @@ def get_current_version() -> str:
     return VERSION
 
 
-def set_current_version(version: str) -> None:
+def set_current_version(version):
     """
     Сохранить версию в файл.
 
@@ -249,7 +268,7 @@ def set_current_version(version: str) -> None:
 # УСТАНОВКА ЗАВИСИМОСТЕЙ
 # ============================================================
 
-def install_dependencies() -> bool:
+def install_dependencies():
     """
     Установить зависимости из requirements.txt если их нет.
 
@@ -262,16 +281,34 @@ def install_dependencies() -> bool:
         logger.warning("requirements.txt не найден, пропускаем установку")
         return True
 
-    # Проверяем, установлены ли критичные зависимости
+    deps_installed_flag = BOT_DIR / ".deps_installed"
+
+    # ПРОВАЕРЯЕМ ИМПОРТЫ ПЕРВЫМИ (всегда, даже если флаг существует)
     try:
         import requests
         import packaging
-        logger.info("✅ Критичные зависимости уже установлены")
+        # Импорты успешны - создаём флаг если его нет
+        if not deps_installed_flag.exists():
+            try:
+                deps_installed_flag.touch()
+            except Exception:
+                pass
+        logger.info("✅ Критичные зависимости доступны")
         return True
     except ImportError:
-        logger.info("📦 Установка зависимостей...")
+        # Модули не доступны
+        pass
 
-    # Пытаемся установить зависимости
+    # Если флаг существует, но импорты не удались - удаляем флаг и пробуем снова
+    if deps_installed_flag.exists():
+        logger.warning("⚠️ Флаг существует, но модули не доступны. Пересоздаём...")
+        try:
+            deps_installed_flag.unlink()
+        except Exception:
+            pass
+
+    # Устанавливаем зависимости
+    logger.info("📦 Установка зависимостей...")
     try:
         subprocess.check_call([
             sys.executable, "-m", "pip", "install",
@@ -285,10 +322,11 @@ def install_dependencies() -> bool:
 
         logger.info("✅ Зависимости успешно установлены")
 
-        # ВАЖНО: После установки зависимостей нужно перезапустить процесс
-        # чтобы новые модули были доступны для импорта
+        # Перезапуск БЕЗ создания флага (флаг создастся при следующем запуске после проверки импортов)
         logger.info("🔄 Перезапуск для применения зависимостей...")
         os.execv(sys.executable, [sys.executable] + sys.argv)
+        # os.execv не возвращается, но для типизации:
+        return True
 
     except subprocess.CalledProcessError as e:
         logger.error(f"❌ Ошибка установки зависимостей: {e}")
@@ -300,7 +338,7 @@ def install_dependencies() -> bool:
 # ПРОВЕРКА ФАЙЛОВОЙ СИСТЕМЫ
 # ============================================================
 
-def check_filesystem_writable(path: Optional[Path] = None) -> bool:
+def check_filesystem_writable(path=None):
     """
     Проверить, можно ли писать в файловую систему.
 
@@ -326,7 +364,7 @@ def check_filesystem_writable(path: Optional[Path] = None) -> bool:
 # ГЛАВНАЯ ФУНКЦИЯ АВТООБНОВЛЕНИЯ
 # ============================================================
 
-def auto_update() -> bool:
+def auto_update():
     """
     Главная функция автообновления.
 
@@ -447,16 +485,6 @@ def fix_import_paths():
 
 
 # ============================================================
-# ПЕРЕЗАПУСК БОТА
-# ============================================================
-
-def restart_bot():
-    """Перезапустить бота после обновления."""
-    logger.info("🔄 Перезапуск бота...")
-    os.execv(sys.executable, [sys.executable] + sys.argv)
-
-
-# ============================================================
 # MAIN ENTRY POINT
 # ============================================================
 
@@ -487,14 +515,15 @@ if __name__ == "__main__":
     try:
         from bot.main import main as main_bot
 
-        # Пытаемся импортировать бота поддержки
+        # Пытаемся импортировать бота поддержки (опционально)
         support_bot_main = None
         try:
+            import support_bot  # Сначала проверяем что модуль существует
             from support_bot.main import main as support_main
             support_bot_main = support_main
-            logger.info("🤖 Запуск основного бота + бота поддержки...")
-        except ImportError as e:
-            logger.warning(f"⚠️ Бот поддержки не найден, запуск только основного: {e}")
+            logger.info("🤖 Бот поддержки найден, запуск...")
+        except ImportError:
+            logger.info("ℹ️ Бот поддержки не установлен, запускаем только основной бот")
         except Exception as e:
             logger.warning(f"⚠️ Ошибка инициализации бота поддержки: {e}")
 
