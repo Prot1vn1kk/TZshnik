@@ -10,7 +10,14 @@ from aiogram.types import Message, CallbackQuery
 import structlog
 
 from database.models import User
-from database.support_crud import get_user_tickets
+
+# Условный импорт support_crud (техподдержка - опциональный модуль)
+try:
+    from database.support_crud import get_user_tickets
+except ImportError:
+    async def get_user_tickets(*args, **kwargs):
+        return []
+
 from support_bot.states import TicketCreationStates
 from support_bot.keyboards.support_keyboards import (
     get_support_main_keyboard,

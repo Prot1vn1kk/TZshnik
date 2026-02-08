@@ -10,7 +10,16 @@ from aiogram.fsm.context import FSMContext
 import structlog
 
 from database.models import User
-from database.support_crud import add_ticket_message
+
+# Условный импорт support_crud (техподдержка - опциональный модуль)
+try:
+    from database.support_crud import add_ticket_message
+    _HAS_SUPPORT_CRUD = True
+except ImportError:
+    _HAS_SUPPORT_CRUD = False
+    async def add_ticket_message(*args, **kwargs):
+        return None
+
 from support_bot.states import TicketMessagingStates
 from support_bot.keyboards.support_keyboards import get_ticket_detail_keyboard
 
@@ -26,6 +35,15 @@ async def handle_user_reply(
     user: User,
 ) -> None:
     """Обработать ответ пользователя на сообщение админа."""
+    # Проверка доступности support_crud
+    if not _HAS_SUPPORT_CRUD:
+        await message.answer(
+            "⚠️ <b>Служба поддержки временно недоступна</b>\n\n"
+            "Пожалуйста, попробуй позже.",
+        )
+        await state.clear()
+        return
+
     text = message.text.strip()
 
     if len(text) > 2000:

@@ -10,12 +10,27 @@ from aiogram.fsm.context import FSMContext
 import structlog
 
 from database.models import User
-from database.support_crud import (
-    create_support_ticket,
-    get_ticket_with_messages,
-    get_user_tickets,
-    update_ticket_status,
-)
+
+# Условный импорт support_crud (техподдержка - опциональный модуль)
+try:
+    from database.support_crud import (
+        create_support_ticket,
+        get_ticket_with_messages,
+        get_user_tickets,
+        update_ticket_status,
+    )
+    _HAS_SUPPORT_CRUD = True
+except ImportError:
+    _HAS_SUPPORT_CRUD = False
+    async def create_support_ticket(*args, **kwargs):
+        return None
+    async def get_ticket_with_messages(*args, **kwargs):
+        return None
+    async def get_user_tickets(*args, **kwargs):
+        return []
+    async def update_ticket_status(*args, **kwargs):
+        return False
+
 from support_bot.states import TicketCreationStates, TicketMessagingStates
 from support_bot.keyboards.support_keyboards import (
     get_support_main_keyboard,
@@ -82,6 +97,16 @@ async def handle_description(
     user: User,
 ) -> None:
     """Обработать описание проблемы и создать тикет."""
+    # Проверка доступности support_crud
+    if not _HAS_SUPPORT_CRUD:
+        await message.answer(
+            "⚠️ <b>Служба поддержки временно недоступна</b>\n\n"
+            "Пожалуйста, попробуй позже или обратись к администратору.",
+            reply_markup=get_support_main_keyboard(),
+        )
+        await state.clear()
+        return
+
     description = message.text.strip()
 
     # Валидация длины
@@ -258,6 +283,10 @@ async def callback_close_ticket(
     state: FSMContext,
 ) -> None:
     """Закрыть тикет (пользователь отмечает как решённый)."""
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Служба поддержки временно недоступна", show_alert=True)
+        return
+
     ticket_id = int(callback.data.split(":")[2])
 
     await update_ticket_status(
@@ -282,6 +311,10 @@ async def callback_reopen_ticket(
     state: FSMContext,
 ) -> None:
     """Переоткрыть тикет."""
+    if not _HAS_SUPPORT_CRUD:
+        await callback.answer("⚠️ Служба поддержки временно недоступна", show_alert=True)
+        return
+
     ticket_id = int(callback.data.split(":")[2])
 
     await update_ticket_status(
