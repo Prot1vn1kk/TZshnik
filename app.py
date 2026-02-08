@@ -24,7 +24,7 @@ from pathlib import Path
 
 GITHUB_REPO = "Prot1vn1kk/TZshnik"
 VERSION_FILE = Path(__file__).parent / ".version"
-VERSION = "2.0.1"  # Starting version
+VERSION = "2.0.3"  # Starting version (должна совпадать с последним релизом)
 
 SKIP_UPDATE_FLAG = Path(__file__).parent / "TelegramBot_v2" / ".skip_update"
 
@@ -155,7 +155,7 @@ def download_release_zip(release_info):
         # Используем httpx если доступен
         try:
             import httpx
-            with httpx.Client(timeout=120) as client:
+            with httpx.Client(timeout=120, follow_redirects=True) as client:
                 response = client.get(zip_url)
                 response.raise_for_status()
                 return response.content
@@ -264,7 +264,12 @@ def get_current_version():
     """
     if VERSION_FILE.exists():
         try:
-            return VERSION_FILE.read_text().strip()
+            content = VERSION_FILE.read_text().strip()
+            # Проверяем что это похоже на версию (начинается с цифры или 'v')
+            # Если это git hash (только hex символы), используем VERSION по умолчанию
+            if content and (content[0].isdigit() or content.startswith('v')):
+                return content
+            # Иначе это git hash или что-то другое - игнорируем
         except Exception:
             pass
     return VERSION
@@ -467,21 +472,25 @@ def auto_update():
         logger.info(f"Последняя версия: {latest_tag}")
 
         # Сравниваем версии
+        # Нормализуем версии (убираем префикс 'v' если есть)
+        current_normalized = current.lstrip('v')
+        latest_normalized = latest_tag.lstrip('v')
+
         if HAS_PACKAGING:
             try:
-                current_ver = PkgVersion(current)
-                latest_ver = PkgVersion(latest_tag)
+                current_ver = PkgVersion(current_normalized)
+                latest_ver = PkgVersion(latest_normalized)
                 if current_ver >= latest_ver:
                     logger.info("✅ Установлена актуальная версия")
                     return True
             except Exception as e:
                 logger.warning(f"Некорректные версии: {e}, используем простое сравнение")
-                if current == latest_tag:
+                if current_normalized == latest_normalized:
                     logger.info("✅ Установлена актуальная версия")
                     return True
         else:
             # Простое строковое сравнение
-            if current == latest_tag:
+            if current_normalized == latest_normalized:
                 logger.info("✅ Установлена актуальная версия")
                 return True
 
