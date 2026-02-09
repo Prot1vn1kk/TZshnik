@@ -1,8 +1,8 @@
 """
 TZshnik v2.0 - Auto-updater Entry Point
 
-Профессиональная система автообновления через GitHub Releases.
-Использует semantic versioning и ZIP архивы для простоты и надёжности.
+Система автообновления через GitHub Commits.
+Автоматически обновляется при каждом git push в ветку main.
 
 Inspired by: https://github.com/alleexxeeyy/playerok-universal
 """
@@ -23,8 +23,8 @@ from pathlib import Path
 # ============================================================
 
 GITHUB_REPO = "Prot1vn1kk/TZshnik"
-VERSION_FILE = Path(__file__).parent / ".version"
-VERSION = "2.0.3"  # Starting version (должна совпадать с последним релизом)
+GITHUB_BRANCH = "main"  # Ветка для отслеживания
+COMMIT_FILE = Path(__file__).parent / ".commit"  # Файл с текущим коммитом
 
 SKIP_UPDATE_FLAG = Path(__file__).parent / "TelegramBot_v2" / ".skip_update"
 
@@ -45,17 +45,16 @@ logger = logging.getLogger("TZshnik.Updater")
 
 
 # ============================================================
-# GITHUB RELEASES API (ленивый импорт httpx)
+# GITHUB COMMITS API
 # ============================================================
 
-def get_releases():
+def get_latest_commit():
     """
-    Получить все релизы с GitHub.
+    Получить последний коммит из ветки main.
 
     Returns:
-        Список релизов в формате JSON
+        SHA коммита или None
     """
-    # Пробуем httpx, потом requests как fallback
     try:
         import httpx
     except ImportError:
@@ -63,96 +62,40 @@ def get_releases():
             import requests
         except ImportError:
             logger.warning("httpx и requests не установлены, пропускаем проверку обновлений")
-            return []
+            return None
 
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/commits/{GITHUB_BRANCH}"
 
     try:
-        # Используем httpx если доступен
         try:
             import httpx
             with httpx.Client(timeout=30) as client:
                 response = client.get(url)
                 response.raise_for_status()
-                return response.json()
+                data = response.json()
+                return data.get("sha")
         except ImportError:
-            # Fallback на requests
             import requests
             response = requests.get(url, timeout=30)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            return data.get("sha")
     except Exception as e:
         logger.warning(f"Ошибка запроса к GitHub API: {e}")
-        return []
+        return None
 
 
-def get_latest_release(releases):
+def download_branch_zip():
     """
-    Найти последний релиз по semantic versioning.
-
-    Args:
-        releases: Список релизов из GitHub API
-
-    Returns:
-        Последний релиз или None
-    """
-    # Пробуем использовать packaging для semver
-    try:
-        from packaging.version import Version as PkgVersion
-        use_semver = True
-    except ImportError:
-        use_semver = False
-        logger.info("packaging не установлен, используем строковое сравнение версий")
-
-    latest = None
-    latest_ver = None
-
-    for rel in releases:
-        tag_name = rel.get("tag_name", "")
-        if not tag_name:
-            continue
-
-        # Пропускаем prerelease если есть более стабильные
-        if rel.get("prerelease", False):
-            continue
-
-        if use_semver:
-            try:
-                ver = PkgVersion(tag_name)
-                if latest_ver is None or ver > latest_ver:
-                    latest_ver = ver
-                    latest = rel
-            except Exception:
-                # Пропускаем теги, которые не являются semver
-                continue
-        else:
-            # Простое строковое сравнение (fallback)
-            # Предполагаем что GitHub API возвращает релизы в правильном порядке
-            if latest is None:
-                latest = rel
-                latest_ver = tag_name
-
-    return latest
-
-
-def download_release_zip(release_info):
-    """
-    Скачать ZIP архив релиза.
-
-    Args:
-        release_info: Информация о релизе из GitHub API
+    Скачать ZIP архив ветки main.
 
     Returns:
         Содержимое архива в байтах или None
     """
-    zip_url = release_info.get('zipball_url')
-    if not zip_url:
-        logger.error("В релизе нет URL для скачивания архива")
-        return None
+    zip_url = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
 
     try:
-        logger.info(f"Скачивание архива с {zip_url[:50]}...")
-        # Используем httpx если доступен
+        logger.info(f"📥 Скачивание архива ветки {GITHUB_BRANCH}...")
         try:
             import httpx
             with httpx.Client(timeout=120, follow_redirects=True) as client:
@@ -160,9 +103,8 @@ def download_release_zip(release_info):
                 response.raise_for_status()
                 return response.content
         except ImportError:
-            # Fallback на requests
             import requests
-            response = requests.get(zip_url, timeout=120)
+            response = requests.get(zip_url, timeout=120, allow_redirects=True)
             response.raise_for_status()
             return response.content
     except Exception as e:
@@ -252,40 +194,37 @@ def install_release(content):
 
 
 # ============================================================
-# УПРАВЛЕНИЕ ВЕРСИЯМИ
+# УПРАВЛЕНИЕ КОММИТАМИ
 # ============================================================
 
-def get_current_version():
+def get_current_commit():
     """
-    Получить текущую версию из файла.
+    Получить текущий коммит из файла.
 
     Returns:
-        Текущая версия
+        SHA текущего коммита или None
     """
-    if VERSION_FILE.exists():
+    if COMMIT_FILE.exists():
         try:
-            content = VERSION_FILE.read_text().strip()
-            # Проверяем что это похоже на версию (начинается с цифры или 'v')
-            # Если это git hash (только hex символы), используем VERSION по умолчанию
-            if content and (content[0].isdigit() or content.startswith('v')):
+            content = COMMIT_FILE.read_text().strip()
+            if content and len(content) >= 7:  # Минимальная длина короткого SHA
                 return content
-            # Иначе это git hash или что-то другое - игнорируем
         except Exception:
             pass
-    return VERSION
+    return None
 
 
-def set_current_version(version):
+def set_current_commit(commit_sha):
     """
-    Сохранить версию в файл.
+    Сохранить коммит в файл.
 
     Args:
-        version: Версия для сохранения
+        commit_sha: SHA коммита для сохранения
     """
     try:
-        VERSION_FILE.write_text(version)
+        COMMIT_FILE.write_text(commit_sha)
     except Exception as e:
-        logger.warning(f"Не удалось сохранить версию: {e}")
+        logger.warning(f"Не удалось сохранить коммит: {e}")
 
 
 # ============================================================
@@ -417,7 +356,10 @@ def check_filesystem_writable(path=None):
 
 def auto_update():
     """
-    Главная функция автообновления.
+    Главная функция автообновления через GitHub коммиты.
+
+    Сравнивает текущий коммит с последним в ветке main.
+    Если есть новый коммит - скачивает и устанавливает обновление.
 
     Returns:
         True если можно продолжать запуск бота
@@ -443,71 +385,43 @@ def auto_update():
             logger.info("💡 Убедитесь что requirements.txt содержит httpx")
             return True
 
-    # Пробуем импортировать packaging для semver, но не требуем его
     try:
-        from packaging.version import Version as PkgVersion
-        HAS_PACKAGING = True
-    except ImportError:
-        HAS_PACKAGING = False
+        logger.info(f"🔍 Проверка обновлений (ветка {GITHUB_BRANCH})...")
 
-    try:
-        logger.info("🔍 Проверка обновлений через GitHub Releases...")
-
-        # Получаем релизы
-        releases = get_releases()
-        if not releases:
-            logger.info("Нет доступных релизов")
+        # Получаем последний коммит
+        latest_commit = get_latest_commit()
+        if not latest_commit:
+            logger.warning("Не удалось получить последний коммит")
             return True
 
-        # Находим последний релиз
-        latest = get_latest_release(releases)
-        if not latest:
-            logger.info("Не найдено валидных релизов")
+        current_commit = get_current_commit()
+
+        # Показываем короткие SHA для читаемости
+        latest_short = latest_commit[:7]
+        current_short = current_commit[:7] if current_commit else "не установлен"
+
+        logger.info(f"Текущий коммит: {current_short}")
+        logger.info(f"Последний коммит: {latest_short}")
+
+        # Сравниваем коммиты
+        if current_commit and current_commit == latest_commit:
+            logger.info("✅ Установлена актуальная версия")
             return True
-
-        latest_tag = latest.get("tag_name", "")
-        current = get_current_version()
-
-        logger.info(f"Текущая версия: {current}")
-        logger.info(f"Последняя версия: {latest_tag}")
-
-        # Сравниваем версии
-        # Нормализуем версии (убираем префикс 'v' если есть)
-        current_normalized = current.lstrip('v')
-        latest_normalized = latest_tag.lstrip('v')
-
-        if HAS_PACKAGING:
-            try:
-                current_ver = PkgVersion(current_normalized)
-                latest_ver = PkgVersion(latest_normalized)
-                if current_ver >= latest_ver:
-                    logger.info("✅ Установлена актуальная версия")
-                    return True
-            except Exception as e:
-                logger.warning(f"Некорректные версии: {e}, используем простое сравнение")
-                if current_normalized == latest_normalized:
-                    logger.info("✅ Установлена актуальная версия")
-                    return True
-        else:
-            # Простое строковое сравнение
-            if current_normalized == latest_normalized:
-                logger.info("✅ Установлена актуальная версия")
-                return True
 
         # Доступно обновление
-        logger.info(f"📦 Доступно обновление: {latest_tag}")
+        logger.info(f"📦 Доступно обновление: {latest_short}")
 
-        # Скачиваем архив
-        content = download_release_zip(latest)
+        # Скачиваем архив ветки
+        content = download_branch_zip()
         if not content:
             logger.error("Не удалось скачать архив обновления")
             return True  # Продолжаем работу бота
 
         # Устанавливаем обновление
-        logger.info(f"📦 Установка обновления {latest_tag}...")
+        logger.info(f"📦 Установка обновления {latest_short}...")
         if install_release(content):
-            set_current_version(latest_tag)
-            logger.info(f"✅ Обновление до {latest_tag} успешно установлено!")
+            set_current_commit(latest_commit)
+            logger.info(f"✅ Обновление до {latest_short} успешно установлено!")
             return True
         else:
             logger.error("❌ Не удалось установить обновление")

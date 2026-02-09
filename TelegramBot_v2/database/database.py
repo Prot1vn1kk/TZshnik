@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Dict, Any
 
 import structlog
-from sqlalchemy import event, text, inspect
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -152,8 +152,6 @@ async def migrate_database() -> None:
     Checks for missing columns in support_tickets table and adds them.
     """
     async with engine.begin() as conn:
-        inspector = inspect(conn)
-
         # Check if support_tickets table exists
         tables = await conn.execute(
             text("SELECT name FROM sqlite_master WHERE type='table' AND name='support_tickets'")
