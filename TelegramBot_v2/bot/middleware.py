@@ -74,6 +74,8 @@ class UserMiddleware(BaseMiddleware):
                     telegram_id=user_tg.id,
                     error=str(e),
                 )
+                # Пробрасываем исключение - handler не может работать без user
+                raise
         
         return await handler(event, data)
 
