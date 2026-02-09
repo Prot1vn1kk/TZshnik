@@ -91,6 +91,34 @@ class TZGenerator:
         self.text_chain = text_chain
         self.validator = validator or TZValidator()
     
+    @staticmethod
+    def _sanitize_feedback(text: str, max_length: int = 500) -> str:
+        """
+        Очистка пользовательского ввода для безопасной вставки в промпт.
+        
+        Предотвращает prompt injection атаки.
+        
+        Args:
+            text: Пользовательский текст
+            max_length: Максимальная длина
+            
+        Returns:
+            Очищенный текст
+        """
+        if not text:
+            return ""
+        # Ограничиваем длину
+        text = text[:max_length]
+        # Убираем потенциально опасные конструкции
+        text = text.replace("```", "")
+        text = text.replace("---", "")
+        text = text.replace("###", "")
+        # Убираем системные маркеры
+        text = text.replace("SYSTEM:", "")
+        text = text.replace("USER:", "")
+        text = text.replace("ASSISTANT:", "")
+        return text.strip()
+    
     async def generate(
         self,
         photos: List[bytes],
@@ -219,7 +247,10 @@ class TZGenerator:
             # Формируем текст проблем из feedback и предыдущего ТЗ
             validation_issues = []
             if feedback:
-                validation_issues.append(f"Отзыв пользователя: {feedback}")
+                # Санитизируем пользовательский ввод для безопасности
+                safe_feedback = self._sanitize_feedback(feedback)
+                if safe_feedback:
+                    validation_issues.append(f"Отзыв пользователя: {safe_feedback}")
             if previous_tz:
                 validation_issues.append("Необходимо улучшить качество и полноту ТЗ")
             
@@ -408,7 +439,8 @@ class TZGenerator:
         
         # Если дошли сюда - возвращаем лучший результат
         # best_validation гарантированно не None, так как цикл выполнился хотя бы раз
-        assert best_validation is not None, "Validation should have been performed"
+        if best_validation is None:
+            raise ValueError("Validation should have been performed")
         logger.info(
             "Returning best result from all attempts",
             score=best_score,

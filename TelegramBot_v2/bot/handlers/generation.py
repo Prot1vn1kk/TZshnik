@@ -683,6 +683,9 @@ async def callback_regenerate(
         # Возвращаем кредит
         await increase_balance(telegram_id, 1)
         
+        # Очищаем состояние FSM
+        await state.clear()
+        
         await progress.error(str(e)[:200])
         logger.error("Regeneration failed", error=str(e))
 

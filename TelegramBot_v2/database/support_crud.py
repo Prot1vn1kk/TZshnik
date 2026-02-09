@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
-from sqlalchemy import and_, desc, func, select, update, delete
+from sqlalchemy import and_, desc, Float, func, select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -529,14 +529,13 @@ async def get_support_stats() -> Dict[str, Any]:
         sla_breach_count = sla_breach_result.scalar() or 0
 
         # SLA: Среднее время первого ответа (для тикетов с ответом)
+        # Используем julianday для SQLite-совместимости
         avg_response_result = await session.execute(
             select(
                 func.avg(
-                    func.cast(
-                        SupportTicket.first_response_at - SupportTicket.created_at,
-                        Float
-                    )
-                ) / 3600  # Конвертируем в часы
+                    (func.julianday(SupportTicket.first_response_at) - 
+                     func.julianday(SupportTicket.created_at)) * 24
+                )
             )
             .where(SupportTicket.first_response_at.isnot(None))
         )

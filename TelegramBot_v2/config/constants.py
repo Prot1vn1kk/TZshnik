@@ -49,6 +49,15 @@ DEFAULT_FREE_CREDITS: Final[int] = 1
 # Максимальная длина username для отображения
 MAX_USERNAME_DISPLAY_LENGTH: Final[int] = 30
 
+# Максимальная длина сообщения в Telegram
+MAX_MESSAGE_LENGTH: Final[int] = 4000
+
+# Длина превью ТЗ
+PREVIEW_LENGTH: Final[int] = 1000
+
+# Rate limiting по умолчанию (секунды между запросами)
+DEFAULT_RATE_LIMIT: Final[float] = 0.5
+
 
 # ============================================================
 # ВРЕМЕННЫЕ ФАЙЛЫ

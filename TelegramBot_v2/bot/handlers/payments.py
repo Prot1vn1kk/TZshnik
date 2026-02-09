@@ -529,25 +529,35 @@ async def handle_pre_checkout(pre_checkout: PreCheckoutQuery, bot: Bot) -> None:
         from bot.utils.package_menu import get_unlimited_status_text
 
         user = await get_user_by_telegram_id(pre_checkout.from_user.id)
-        if user:
-            unlimited_status = get_unlimited_status_text(user)
+        if not user:
+            logger.warning(
+                "pre_checkout_user_not_found",
+                telegram_id=pre_checkout.from_user.id,
+            )
+            await pre_checkout.answer(
+                ok=False,
+                error_message="Пользователь не найден. Перезапустите бота командой /start.",
+            )
+            return
+        
+        unlimited_status = get_unlimited_status_text(user)
 
-            if unlimited_status["is_active"]:
-                # Блокируем покупку кредитов
-                if not package.is_unlimited:
-                    await pre_checkout.answer(
-                        ok=False,
-                        error_message="У вас активна безлимитная подписка! Покупка кредитов недоступна.",
-                    )
-                    return
+        if unlimited_status["is_active"]:
+            # Блокируем покупку кредитов
+            if not package.is_unlimited:
+                await pre_checkout.answer(
+                    ok=False,
+                    error_message="У вас активна безлимитная подписка! Покупка кредитов недоступна.",
+                )
+                return
 
-                # Блокируем раннее продление безлимита
-                if package.is_unlimited and not unlimited_status["can_renew"]:
-                    await pre_checkout.answer(
-                        ok=False,
-                        error_message=f"Продление доступно за {MIN_DAYS_LEFT_FOR_RENEWAL} дней до окончания. Осталось {unlimited_status['days_left']} дней.",
-                    )
-                    return
+            # Блокируем раннее продление безлимита
+            if package.is_unlimited and not unlimited_status["can_renew"]:
+                await pre_checkout.answer(
+                    ok=False,
+                    error_message=f"Продление доступно за {MIN_DAYS_LEFT_FOR_RENEWAL} дней до окончания. Осталось {unlimited_status['days_left']} дней.",
+                )
+                return
 
     except Exception as e:
         logger.error("pre_checkout_validation_error", error=str(e))
@@ -594,8 +604,33 @@ async def handle_successful_payment(
     )
     
     try:
-        # Парсим payload
+        # Проверка идемпотентности: не обрабатываем повторные webhook'и
+        from database.crud import get_payment_by_telegram_id
+        
+        existing_payment = await get_payment_by_telegram_id(payment.telegram_payment_charge_id)
+        if existing_payment:
+            logger.warning(
+                "duplicate_payment_webhook",
+                telegram_payment_id=payment.telegram_payment_charge_id,
+                existing_payment_id=existing_payment.id,
+            )
+            await message.answer("✅ Платёж уже обработан!")
+            return
+        
+        # Парсим и валидируем payload
         parts = payment.invoice_payload.split(":")
+        if len(parts) != 3 or parts[0] != "credits":
+            logger.error(
+                "invalid_payload_format",
+                payload=payment.invoice_payload,
+                user_id=message.from_user.id,
+            )
+            await message.answer(
+                "⚠️ Ошибка формата платежа. Обратитесь в поддержку:\n"
+                "@TZshnik_support_bot"
+            )
+            return
+        
         package_id = parts[1]
         payload_user_id = int(parts[2])
         

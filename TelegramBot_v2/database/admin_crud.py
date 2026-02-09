@@ -545,12 +545,11 @@ async def admin_block_user(
     Returns:
         True если успешно
     """
-    # TODO: Добавить поле is_blocked в User и обновить эту функцию
     async with get_session() as session:
         result = await session.execute(
             update(User)
             .where(User.telegram_id == telegram_id)
-            .values(balance=0)  # Временная "блокировка" - обнуляем баланс
+            .values(is_blocked=True)
         )
         
         if result.rowcount > 0:
@@ -588,14 +587,13 @@ async def admin_unblock_user(
         True если успешно
     """
     async with get_session() as session:
-        # Для полноценной разблокировки нужно поле is_blocked
-        # Пока просто логируем действие
         result = await session.execute(
-            select(User).where(User.telegram_id == telegram_id)
+            update(User)
+            .where(User.telegram_id == telegram_id)
+            .values(is_blocked=False)
         )
-        user = result.scalar_one_or_none()
         
-        if user:
+        if result.rowcount > 0:
             await log_admin_action(
                 admin_id=admin_id,
                 action_type="user_unblock",

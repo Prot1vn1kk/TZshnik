@@ -10,6 +10,7 @@ from typing import List, Optional, Tuple
 
 import structlog
 from sqlalchemy import desc, func, select, update
+from sqlalchemy.orm import selectinload
 
 from database.database import get_session
 from database.models import Feedback, Generation, GenerationPhoto, Idea, Payment, User
@@ -184,7 +185,8 @@ async def decrease_balance(telegram_id: int, amount: int = 1) -> bool:
     Списать кредиты с баланса пользователя.
     
     Атомарная операция: списание происходит только если
-    баланс достаточен.
+    баланс достаточен. Использует UPDATE ... WHERE balance >= amount
+    для предотвращения race condition.
     
     Args:
         telegram_id: ID пользователя в Telegram
@@ -194,6 +196,7 @@ async def decrease_balance(telegram_id: int, amount: int = 1) -> bool:
         True если списание успешно, False если недостаточно средств
     """
     async with get_session() as session:
+        # Сначала проверяем unlimited статус
         result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
         )
@@ -219,15 +222,25 @@ async def decrease_balance(telegram_id: int, amount: int = 1) -> bool:
             )
             return True
 
-        if user.balance < amount:
+        # Атомарное списание с проверкой баланса
+        update_result = await session.execute(
+            update(User)
+            .where(
+                User.telegram_id == telegram_id,
+                User.balance >= amount,
+            )
+            .values(balance=User.balance - amount)
+        )
+        
+        if update_result.rowcount == 0:
             logger.warning(
                 "balance_decrease_failed",
                 telegram_id=telegram_id,
                 amount=amount,
+                reason="insufficient_balance",
             )
             return False
 
-        user.balance -= amount
         logger.info(
             "balance_decreased",
             telegram_id=telegram_id,
@@ -451,6 +464,7 @@ async def get_user_generations(
     async with get_session() as session:
         result = await session.execute(
             select(Generation)
+            .options(selectinload(Generation.photos))
             .join(User)
             .where(User.telegram_id == telegram_id)
             .order_by(desc(Generation.created_at))
@@ -527,8 +541,26 @@ async def update_generation_tz(
         return result.rowcount > 0
 
 
-
 # ==================== PAYMENTS ====================
+
+async def get_payment_by_telegram_id(telegram_payment_id: str) -> Optional[Payment]:
+    """
+    Получить платёж по Telegram payment ID.
+    
+    Используется для проверки идемпотентности платежей —
+    предотвращает повторное начисление при дублирующихся webhook'ах.
+    
+    Args:
+        telegram_payment_id: ID платежа в Telegram
+        
+    Returns:
+        Payment или None если не найден
+    """
+    async with get_session() as session:
+        result = await session.execute(
+            select(Payment).where(Payment.telegram_payment_id == telegram_payment_id)
+        )
+        return result.scalar_one_or_none()
 
 async def create_payment(
     user_id: int,

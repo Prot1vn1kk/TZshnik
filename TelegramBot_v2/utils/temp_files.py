@@ -245,9 +245,9 @@ def delete_temp_photo(user_id: int, photo_id: str) -> bool:
     if not user_dir.exists():
         return False
     
-    # Ищем файл по ID в имени
+    # Ищем файл по ID в имени (точное совпадение суффикса)
     for file_path in user_dir.iterdir():
-        if photo_id in file_path.name:
+        if file_path.stem.endswith(f"_{photo_id}"):
             try:
                 file_path.unlink()
                 logger.info(

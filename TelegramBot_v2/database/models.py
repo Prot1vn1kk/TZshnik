@@ -17,6 +17,7 @@ from typing import List, Optional
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -100,6 +101,10 @@ class User(Base):
         Boolean,
         default=False,
     )
+    is_blocked: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+    )
     unlimited_until: Mapped[Optional[datetime]] = mapped_column(
         DateTime,
         nullable=True,
@@ -131,22 +136,18 @@ class User(Base):
     generations: Mapped[List["Generation"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="selectin",
     )
     payments: Mapped[List["Payment"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="selectin",
     )
     ideas: Mapped[List["Idea"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="selectin",
     )
     support_tickets: Mapped[List["SupportTicket"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="selectin",
     )
     
     # Self-referential для рефералов
@@ -392,6 +393,9 @@ class Feedback(Base):
     """
     
     __tablename__ = "feedbacks"
+    __table_args__ = (
+        CheckConstraint("rating IN (0, 1)", name="check_feedback_rating_valid"),
+    )
     
     id: Mapped[int] = mapped_column(
         Integer,

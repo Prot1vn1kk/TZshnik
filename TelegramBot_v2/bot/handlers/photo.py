@@ -33,6 +33,7 @@ from utils.temp_files import (
     read_temp_photo,
     ALLOWED_EXTENSIONS,
 )
+from config.constants import MAX_PHOTOS_PER_GENERATION as MAX_PHOTOS
 
 
 logger = structlog.get_logger()
@@ -42,8 +43,6 @@ router = Router(name="photo")
 # ============================================================
 # КОНСТАНТЫ
 # ============================================================
-
-MAX_PHOTOS = 5  # Максимум фото для одной генерации
 
 # Сообщения для пользователя
 INVALID_FORMAT_MESSAGE = (

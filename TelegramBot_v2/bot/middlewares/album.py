@@ -96,11 +96,12 @@ class AlbumMiddleware(BaseMiddleware):
         await asyncio.sleep(self.ALBUM_LATENCY)
         
         # Забираем собранный альбом
-        async with self._locks[media_group_id]:
-            album = self._albums.pop(media_group_id, [])
-            # Очищаем lock
-            if media_group_id in self._locks:
-                del self._locks[media_group_id]
+        try:
+            async with self._locks[media_group_id]:
+                album = self._albums.pop(media_group_id, [])
+        finally:
+            # Гарантированно удаляем lock
+            self._locks.pop(media_group_id, None)
         
         if not album:
             return None

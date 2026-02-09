@@ -77,7 +77,35 @@ class UserMiddleware(BaseMiddleware):
                 # Пробрасываем исключение - handler не может работать без user
                 raise
         
-        return await handler(event, data)
+        # Проверяем блокировку пользователя
+        if user and hasattr(user, 'is_blocked') and user.is_blocked:
+            from aiogram.types import Message, CallbackQuery
+            if isinstance(event, Message):
+                await event.answer("⛔ Ваш аккаунт заблокирован. Обратитесь в поддержку.")
+            elif isinstance(event, CallbackQuery):
+                await event.answer("Ваш аккаунт заблокирован.", show_alert=True)
+            return None
+        
+        try:
+            return await handler(event, data)
+        except Exception as e:
+            logger.error(
+                "Handler error",
+                telegram_id=getattr(user_tg, 'id', None) if user_tg else None,
+                error=str(e),
+            )
+            # Отправляем сообщение пользователю об ошибке
+            from aiogram.types import Message, CallbackQuery
+            try:
+                if isinstance(event, Message):
+                    await event.answer(
+                        "⚠️ Произошла ошибка. Попробуйте ещё раз или обратитесь в поддержку."
+                    )
+                elif isinstance(event, CallbackQuery):
+                    await event.answer("Ошибка. Попробуйте ещё раз.", show_alert=True)
+            except Exception:
+                pass  # Не падаем если не удалось отправить ошибку
+            raise
 
 
 class LoggingMiddleware(BaseMiddleware):
